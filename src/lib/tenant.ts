@@ -21,6 +21,12 @@ import { CompanyId } from '../types';
 // no código, não escondido atrás de um singleton.
 export const DEFAULT_COMPANY_ID: CompanyId = 'acii';
 
+// Sentinela de sessão (não existe como documento em companies/) usada só
+// pro dono da plataforma antes de ele escolher entrar numa empresa
+// específica — ver o mesmo nome em functions/index.js (linkGoogleUser) e
+// o componente PlatformAdminHome. Precisa ficar IDÊNTICA nos dois lados.
+export const PLATFORM_COMPANY_ID: CompanyId = '__platform__';
+
 let currentCompanyId: CompanyId | null = null;
 
 /** Chamado pelo App.tsx assim que o login (por senha ou Google) resolve o usuário. */

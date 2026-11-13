@@ -61,6 +61,13 @@ const REGION = 'us-central1';
 // gravado pelo script functions/migrate-add-company-id.js.
 const DEFAULT_COMPANY_ID = 'acii';
 
+// Sentinela (não é um documento real em companies/) usada só pra sessão do
+// dono da plataforma (RUNTIME_ADMIN_EMAIL, logo abaixo) quando ele ainda
+// não escolheu entrar numa empresa específica — ver comentário grande em
+// linkGoogleUser(). Precisa ser IDÊNTICO a PLATFORM_COMPANY_ID em
+// src/lib/tenant.ts.
+const PLATFORM_COMPANY_ID = '__platform__';
+
 initializeApp({ projectId: PROJECT_ID });
 
 let firestoreInstance = null;
@@ -509,7 +516,18 @@ exports.linkGoogleUser = onCall({ region: REGION }, async (request) => {
     // Fase 1 (multiempresa): resolve a empresa pelo funcionário vinculado
     // (mesma fonte usada pra papel/setor), depois pela conta já existente,
     // e só por último cai no primeiro tenant — nunca fica "sem empresa".
-    const companyId = matchedEmployee?.companyId || existingData?.companyId || DEFAULT_COMPANY_ID;
+    //
+    // Dono da plataforma (isRuntimeAdmin) é tratado à parte: ele não é
+    // funcionário de nenhuma empresa-cliente, então cai sempre na
+    // sentinela neutra PLATFORM_COMPANY_ID a cada login novo — a tela
+    // inicial dele é a administração da plataforma (lista de empresas +
+    // criar/resetar), nunca os dados reais de um cliente por padrão.
+    // "Entrar" numa empresa específica (botão na tela neutra) é uma ação
+    // explícita de sessão, via exports.enterCompany logo abaixo — nunca
+    // persiste como o companyId padrão do próximo login.
+    const companyId = isRuntimeAdmin
+      ? PLATFORM_COMPANY_ID
+      : (matchedEmployee?.companyId || existingData?.companyId || DEFAULT_COMPANY_ID);
 
     const userDataToSave = {
       id: uid,
@@ -734,6 +752,78 @@ exports.createCompany = onCall({ region: REGION }, async (request) => {
     logger.error('❌ ERRO NA FUNÇÃO CREATECOMPANY:', err);
     if (err instanceof HttpsError) throw err;
     throw new HttpsError('internal', `Erro ao criar empresa [${err.code || 'ERRO'}]: ${err.message || 'Erro inesperado'}`);
+  }
+});
+
+// ───────────────────────────────────────────────────────────────────────
+// listCompanies / enterCompany — suporte à tela neutra do dono da
+// plataforma (ver PLATFORM_COMPANY_ID e linkGoogleUser acima).
+// ─────────────────────────────────────────────────────────────────────
+// listCompanies: só o id/nome das empresas ativas, pra montar a lista com
+// botão "Entrar" na tela neutra. Mesma restrição de acesso de
+// createCompany — nenhuma empresa-cliente pode enumerar as outras.
+exports.listCompanies = onCall({ region: REGION }, async (request) => {
+  const callerEmail = (request.auth?.token?.email || '').toLowerCase();
+  if (!request.auth || callerEmail !== RUNTIME_ADMIN_EMAIL) {
+    throw new HttpsError('permission-denied', 'Só o administrador da plataforma pode listar as empresas.');
+  }
+  const snap = await db().collection('companies').orderBy('name').get();
+  return { companies: snap.docs.map((d) => ({ id: d.id, name: d.data().name || d.id })) };
+});
+
+// enterCompany: o dono da plataforma escolhe entrar numa empresa já
+// existente a partir da tela neutra. Atualiza users/{uid} e
+// auth_links/{uid} pro companyId escolhido — sem isso, as Firestore
+// Rules (que leem companyId de auth_links, nunca do cliente) continuariam
+// vendo a sessão como PLATFORM_COMPANY_ID e bloqueariam qualquer leitura/
+// escrita da empresa. É uma troca de sessão, não persiste como padrão do
+// próximo login (linkGoogleUser sempre volta pra PLATFORM_COMPANY_ID).
+exports.enterCompany = onCall({ region: REGION }, async (request) => {
+  try {
+    const callerEmail = (request.auth?.token?.email || '').toLowerCase();
+    if (!request.auth || callerEmail !== RUNTIME_ADMIN_EMAIL) {
+      throw new HttpsError('permission-denied', 'Só o administrador da plataforma pode trocar de empresa.');
+    }
+
+    const companyId = String(request.data?.companyId || '').trim();
+    if (!companyId) {
+      throw new HttpsError('invalid-argument', 'Informe a empresa que deseja acessar.');
+    }
+
+    const firestore = db();
+    const companySnap = await firestore.collection('companies').doc(companyId).get();
+    if (!companySnap.exists) {
+      throw new HttpsError('not-found', 'Empresa não encontrada.');
+    }
+
+    const uid = request.auth.uid;
+    const displayName = request.auth.token?.name || 'Usuário Google';
+
+    await firestore.collection('users').doc(uid).set(
+      { id: uid, companyId, role: 'admin', updatedAt: FieldValue.serverTimestamp() },
+      { merge: true }
+    );
+    await firestore.collection('auth_links').doc(uid).set(
+      { userId: uid, role: 'admin', sectorId: null, companyId, updatedAt: FieldValue.serverTimestamp() },
+      { merge: true }
+    );
+
+    return {
+      success: true,
+      userData: {
+        id: uid,
+        companyId,
+        username: callerEmail.split('@')[0],
+        name: displayName,
+        role: 'admin',
+        employeeId: null
+      },
+      companyName: companySnap.data().name || companyId
+    };
+  } catch (err) {
+    logger.error('❌ ERRO NA FUNÇÃO ENTERCOMPANY:', err);
+    if (err instanceof HttpsError) throw err;
+    throw new HttpsError('internal', `Erro ao trocar de empresa [${err.code || 'ERRO'}]: ${err.message || 'Erro inesperado'}`);
   }
 });
 

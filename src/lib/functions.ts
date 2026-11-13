@@ -31,6 +31,17 @@ export const createCompanyCallable = httpsCallable(functions, 'createCompany');
 // permission-denied pra qualquer chamador que não seja RUNTIME_ADMIN_EMAIL.
 export const platformResetPasswordCallable = httpsCallable(functions, 'platformResetPassword');
 
+// Lista id/nome das empresas ativas — só pro dono da plataforma, pra
+// montar a tela neutra (PlatformAdminHome) com um botão "Entrar" por
+// empresa. Mesma restrição de acesso de createCompany.
+export const listCompaniesCallable = httpsCallable(functions, 'listCompanies');
+
+// Troca a sessão do dono da plataforma (que começa sempre na sentinela
+// PLATFORM_COMPANY_ID, ver src/lib/tenant.ts) pra uma empresa existente,
+// atualizando auth_links/{uid} no servidor — sem isso as Firestore Rules
+// continuariam enxergando a sessão como a sentinela.
+export const enterCompanyCallable = httpsCallable(functions, 'enterCompany');
+
 // "Esqueci minha senha" self-service — a conta precisa ter e-mail
 // cadastrado (users/{id}.email, editável em Painel Admin → Usuários).
 // Sem login/sessão nenhuma: é exatamente o cenário de "não consigo

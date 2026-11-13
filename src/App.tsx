@@ -94,7 +94,8 @@ import { usePopsState } from './hooks/usePopsState';
 import { useItsState } from './hooks/useItsState';
 import { useSectorsState } from './hooks/useSectorsState';
 import { useEmployeesState } from './hooks/useEmployeesState';
-import { DEFAULT_COMPANY_ID, setCurrentCompanyId } from './lib/tenant';
+import { DEFAULT_COMPANY_ID, PLATFORM_COMPANY_ID, setCurrentCompanyId } from './lib/tenant';
+import PlatformAdminHome from './components/PlatformAdminHome';
 
 // Fase 3 (onboarding): só este e-mail Google pode abrir o cadastro de
 // nova empresa — precisa bater com RUNTIME_ADMIN_EMAIL em
@@ -555,7 +556,12 @@ export default function App() {
     // `companyId` acima): as regras passam a exigir que o companyId do
     // documento bata com o de auth_links/{uid}, que só é gravado pelas
     // Cloud Functions login/linkGoogleUser.
-    if (!db || !authReady || !companyId) return;
+    // Sentinela do dono da plataforma (ver PLATFORM_COMPANY_ID em
+    // src/lib/tenant.ts): não é uma empresa de verdade, então não existe
+    // nenhum dado pra assinar — a tela neutra (PlatformAdminHome) cuida de
+    // tudo sozinha. Tentar abrir estes listeners contra a sentinela só
+    // geraria permission-denied inútil nas Firestore Rules.
+    if (!db || !authReady || !companyId || companyId === PLATFORM_COMPANY_ID) return;
 
     // Mesmo bug de classe já corrigido abaixo pra `users` (ver comentário
     // grande logo ali): ao trocar de empresa no mesmo navegador sem recarregar
@@ -1626,6 +1632,23 @@ export default function App() {
 
   if (!currentUser) {
     return <LoginView onLogin={handleLogin} users={users} onUpdateUsers={handleUpdateUsers} />;
+  }
+
+  // Dono da plataforma ainda não escolheu entrar numa empresa — tela
+  // neutra (sem dados/branding de nenhum cliente), não o portal da ACII.
+  // Ver PLATFORM_COMPANY_ID em src/lib/tenant.ts.
+  if (currentUser.companyId === PLATFORM_COMPANY_ID) {
+    return (
+      <PlatformAdminHome
+        currentUser={currentUser}
+        onEnteredCompany={(updatedUser) => {
+          setCurrentUser(updatedUser);
+          setCurrentCompanyId(updatedUser.companyId || DEFAULT_COMPANY_ID);
+          localStorage.setItem('ms-current-user', JSON.stringify(updatedUser));
+        }}
+        onLogout={handleLogout}
+      />
+    );
   }
 
   return (
