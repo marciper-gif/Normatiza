@@ -545,7 +545,15 @@ export default function App() {
     });
 
     return () => unsubscribe();
-  }, [employees, sectors]);
+    // Sem employees/sectors nas deps: nenhum dos dois é usado aqui dentro.
+    // Antes, listá-los fazia este efeito reinscrever o onAuthStateChanged
+    // toda vez que esses estados carregavam — e o Firebase dispara o
+    // callback de novo ao reinscrever, rerodando linkGoogleUserCallable.
+    // Pro dono da plataforma (RUNTIME_ADMIN_EMAIL) isso sempre resolve de
+    // volta pra PLATFORM_COMPANY_ID (ver linkGoogleUser em
+    // functions/index.js), desfazendo o enterCompany 1s depois de entrar
+    // numa empresa — exatamente o sintoma reportado.
+  }, []);
 
   // Synchronize collections with Firestore for real-time multi-device persistence
   useEffect(() => {
