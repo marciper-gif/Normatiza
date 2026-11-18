@@ -58,19 +58,14 @@ service firebase.storage {
 
     // documentos/{sectorId}/{documentId}/v{version}_{fileName}
     match /documentos/{sectorId}/{documentId}/{fileName} {
-      // NOTA: o campo extraViewerSectorIds (setores extras com permissão
-      // de visualização de um documento específico, item 5/6 da
-      // especificação) NÃO é checado aqui — ele vive em
-      // guarded_documents/{documentId} no Firestore, e checá-lo exigiria
-      // de novo uma consulta cross-service (mesma limitação do banco
-      // nomeado acima). Continua funcionando normalmente na TELA (o
-      // Firestore libera a leitura da metadata pros setores extras
-      // normalmente), mas o arquivo em si no Storage só é liberado pro
-      // setor dono do documento ou admin. TODO: se isso virar bloqueio
-      // real no uso, resolver com uma Cloud Function callable que gera
-      // uma URL assinada de download após checar o Firestore no servidor
-      // (sem as limitações do storage.rules).
-      allow read: if isAuthenticated() && (isAdmin() || currentSectorId() == sectorId);
+      // LEITURA FECHADA PARA O CLIENTE. Todo download passa pela Cloud
+      // Function getDocumentDownloadUrl (functions/index.js), que confere
+      // no Firestore, no servidor, se o usuário é admin, do setor dono ou
+      // de um setor em extraViewerSectorIds, e devolve uma URL assinada de
+      // 5 minutos. Isso resolve a limitação antiga (storage.rules não
+      // consegue consultar o Firestore nomeado) e elimina o link com token
+      // permanente (getDownloadURL) que ignorava estas regras.
+      allow read: if false;
 
       // Upload/nova versão: admin ou gestor do próprio setor da pasta.
       // TODO (etapa 9 da especificação): incluir aqui também quem tiver

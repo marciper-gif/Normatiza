@@ -31,6 +31,7 @@
 const { initializeApp } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
+const { getStorage } = require('firebase-admin/storage');
 const { onDocumentWritten } = require('firebase-functions/v2/firestore');
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { logger } = require('firebase-functions');
@@ -43,7 +44,9 @@ const PROJECT_ID = 'dogwood-loader-bln7n';
 const FIRESTORE_DATABASE_ID = 'ai-studio-aciicontroledodo-8a9badc3-1faa-4b52-9783-49cb0814c900';
 const REGION = 'us-central1';
 
-initializeApp({ projectId: PROJECT_ID });
+const STORAGE_BUCKET = 'dogwood-loader-bln7n.firebasestorage.app';
+
+initializeApp({ projectId: PROJECT_ID, storageBucket: STORAGE_BUCKET });
 
 let firestoreInstance = null;
 function db() {
@@ -474,5 +477,85 @@ exports.setPassword = onCall({ region: REGION }, async (request) => {
     logger.error('❌ ERRO NA FUNÇÃO SETPASSWORD:', err);
     if (err instanceof HttpsError) throw err;
     throw new HttpsError('internal', `Erro ao alterar senha [${err.code || 'ERRO'}]: ${err.message || 'Erro inesperado'}`);
+  }
+});
+
+/**
+ * getDocumentDownloadUrl({ documentId, version? })
+ * ─────────────────────────────────────────────────────────────────────
+ * Único caminho de leitura de arquivos do módulo de guarda de documentos.
+ * Antes, o cliente gravava no Firestore o link de download com token
+ * permanente (getDownloadURL) e o usava direto — quem tivesse o link
+ * baixava o arquivo SEM passar pelo storage.rules (e o storage.rules, por
+ * limitação do banco Firestore nomeado, não conseguia checar
+ * extraViewerSectorIds de qualquer jeito). Agora a permissão é conferida
+ * aqui, no servidor, com o mesmo critério do firestore.rules
+ * (guarded_documents: admin, setor dono ou setor em extraViewerSectorIds),
+ * e o retorno é uma URL assinada que expira em poucos minutos.
+ */
+const SIGNED_URL_TTL_MS = 5 * 60 * 1000;
+
+exports.getDocumentDownloadUrl = onCall({ region: REGION }, async (request) => {
+  try {
+    if (!request.auth) {
+      throw new HttpsError('unauthenticated', 'Sessão inválida. Faça login novamente.');
+    }
+    const documentId = String(request.data?.documentId || '').trim();
+    const version = request.data?.version != null ? Number(request.data.version) : null;
+    if (!documentId) {
+      throw new HttpsError('invalid-argument', 'Documento não informado.');
+    }
+
+    const firestore = db();
+    const linkSnap = await firestore.collection('auth_links').doc(request.auth.uid).get();
+    if (!linkSnap.exists) {
+      throw new HttpsError('permission-denied', 'Sessão sem vínculo de usuário. Faça login novamente.');
+    }
+    const link = linkSnap.data();
+
+    const docSnap = await firestore.collection('guarded_documents').doc(documentId).get();
+    if (!docSnap.exists) {
+      throw new HttpsError('not-found', 'Documento não encontrado.');
+    }
+    const document = docSnap.data();
+
+    const extra = Array.isArray(document.extraViewerSectorIds) ? document.extraViewerSectorIds : [];
+    const allowed =
+      link.role === 'admin' ||
+      (link.sectorId && link.sectorId === document.sectorId) ||
+      (link.sectorId && extra.includes(link.sectorId));
+    if (!allowed) {
+      throw new HttpsError('permission-denied', 'Sem permissão para acessar este documento.');
+    }
+
+    let target = document;
+    if (version != null && version !== document.version) {
+      target = (document.previousVersions || []).find((v) => v.version === version);
+      if (!target) {
+        throw new HttpsError('not-found', 'Versão não encontrada.');
+      }
+    }
+
+    const storagePath = String(target.storagePath || '');
+    const expectedPrefix = `documentos/${document.sectorId}/${documentId}/`;
+    if (!storagePath.startsWith(expectedPrefix) || storagePath.includes('..')) {
+      throw new HttpsError('failed-precondition', 'Arquivo indisponível.');
+    }
+
+    const [url] = await getStorage()
+      .bucket(STORAGE_BUCKET)
+      .file(storagePath)
+      .getSignedUrl({
+        version: 'v4',
+        action: 'read',
+        expires: Date.now() + SIGNED_URL_TTL_MS,
+        responseDisposition: `inline; filename*=UTF-8''${encodeURIComponent(target.fileName || 'documento')}`
+      });
+
+    return { url };
+  } catch (err) {
+    logger.error('❌ ERRO NA FUNÇÃO GETDOCUMENTDOWNLOADURL:', err);
+    if (err instanceof HttpsError) throw err;
+    throw new HttpsError('internal', `Erro ao gerar link de download [${err.code || 'ERRO'}]: ${err.message || 'Erro inesperado'}`);
   }
 });

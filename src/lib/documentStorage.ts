@@ -1,6 +1,7 @@
-import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
+import { ref, uploadBytesResumable } from 'firebase/storage';
 import { doc, collection } from 'firebase/firestore';
 import { storage, db, auth } from './firebase';
+import { getDocumentDownloadUrlCallable } from './functions';
 
 // Restrições de upload (item 2 da especificação) — validadas aqui no
 // cliente antes de enviar; o storage.rules também valida tamanho/tipo
@@ -52,11 +53,10 @@ function attemptUpload(
         }
       },
       reject,
-      () => {
-        getDownloadURL(task.snapshot.ref)
-          .then(fileUrl => resolve({ fileUrl, storagePath }))
-          .catch(reject);
-      }
+      // Não geramos mais getDownloadURL (link com token permanente que
+      // ignora o storage.rules). O download passa por
+      // openGuardedDocument -> Cloud Function getDocumentDownloadUrl.
+      () => resolve({ fileUrl: '', storagePath })
     );
   });
 }
@@ -112,4 +112,22 @@ export async function uploadGuardedDocumentFile(
 
   // Inalcançável — o loop acima sempre retorna ou lança antes de sair.
   throw new Error('Falha ao enviar o documento.');
+}
+
+/**
+ * Abre um arquivo do módulo de guarda via URL assinada de curta duração,
+ * emitida pelo servidor só depois de conferir a permissão. A aba é aberta
+ * de forma síncrona (no clique) e só depois recebe a URL, para o
+ * bloqueador de pop-ups do navegador não impedir.
+ */
+export async function openGuardedDocument(documentId: string, version?: number): Promise<void> {
+  const tab = window.open('', '_blank');
+  try {
+    const { data } = await getDocumentDownloadUrlCallable({ documentId, version });
+    if (tab) tab.location.href = data.url;
+    else window.location.href = data.url;
+  } catch (err: any) {
+    tab?.close();
+    throw err;
+  }
 }

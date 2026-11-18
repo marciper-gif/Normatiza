@@ -17,3 +17,10 @@ export const linkGoogleUserCallable = httpsCallable(functions, 'linkGoogleUser')
 // Define uma nova senha (troca própria ou reset por admin/gestor) sem
 // nunca gravar texto puro — só o hash.
 export const setPasswordCallable = httpsCallable(functions, 'setPassword');
+
+// Devolve uma URL assinada (expira em minutos) para baixar um arquivo do
+// módulo de guarda de documentos, após checar a permissão no servidor.
+export const getDocumentDownloadUrlCallable = httpsCallable<
+  { documentId: string; version?: number },
+  { url: string }
+>(functions, 'getDocumentDownloadUrl');
