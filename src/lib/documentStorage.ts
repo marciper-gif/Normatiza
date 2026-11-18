@@ -1,6 +1,7 @@
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { doc, collection } from 'firebase/firestore';
 import { storage, db, auth } from './firebase';
+import { getDocumentDownloadUrlCallable } from './functions';
 
 // Restrições de upload (item 2 da especificação) — validadas aqui no
 // cliente antes de enviar; o storage.rules também valida tamanho/tipo
@@ -38,7 +39,8 @@ export function generateGuardedDocumentId(): string {
 function attemptUpload(
   file: File,
   storagePath: string,
-  onProgress?: (pct: number) => void
+  onProgress?: (pct: number) => void,
+  needsDownloadUrl = true
 ): Promise<{ fileUrl: string; storagePath: string }> {
   const storageRef = ref(storage, storagePath);
   const task = uploadBytesResumable(storageRef, file);
@@ -53,6 +55,14 @@ function attemptUpload(
       },
       reject,
       () => {
+        // Documentos guardados NÃO geram getDownloadURL (link com token
+        // permanente que ignora o storage.rules) — o download passa por
+        // openGuardedDocument -> Cloud Function getDocumentDownloadUrl.
+        // Só o logo da empresa (público por desenho) ainda precisa da URL.
+        if (!needsDownloadUrl) {
+          resolve({ fileUrl: '', storagePath });
+          return;
+        }
         getDownloadURL(task.snapshot.ref)
           .then(fileUrl => resolve({ fileUrl, storagePath }))
           .catch(reject);
@@ -74,11 +84,12 @@ async function uploadWithRetry(
   file: File,
   storagePath: string,
   onProgress?: (pct: number) => void,
-  onRetry?: (attempt: number, totalAttempts: number) => void
+  onRetry?: (attempt: number, totalAttempts: number) => void,
+  needsDownloadUrl = true
 ): Promise<{ fileUrl: string; storagePath: string }> {
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     try {
-      return await attemptUpload(file, storagePath, onProgress);
+      return await attemptUpload(file, storagePath, onProgress, needsDownloadUrl);
     } catch (err: any) {
       const isPermissionIssue = err?.code === 'storage/unauthorized';
       const isLastAttempt = attempt === RETRY_DELAYS_MS.length;
@@ -159,5 +170,23 @@ export async function uploadGuardedDocumentFile(
   onRetry?: (attempt: number, totalAttempts: number) => void
 ): Promise<{ fileUrl: string; storagePath: string }> {
   const storagePath = `documentos/${companyId}/${sectorId}/${documentId}/v${version}_${file.name}`;
-  return uploadWithRetry(file, storagePath, onProgress, onRetry);
+  return uploadWithRetry(file, storagePath, onProgress, onRetry, false);
+}
+
+/**
+ * Abre um arquivo do módulo de guarda via URL assinada de curta duração,
+ * emitida pelo servidor só depois de conferir empresa/papel/setor. A aba
+ * é aberta de forma síncrona (no clique) e só depois recebe a URL, para o
+ * bloqueador de pop-ups do navegador não impedir.
+ */
+export async function openGuardedDocument(documentId: string, version?: number): Promise<void> {
+  const tab = window.open('', '_blank');
+  try {
+    const { data } = await getDocumentDownloadUrlCallable({ documentId, version });
+    if (tab) tab.location.href = data.url;
+    else window.location.href = data.url;
+  } catch (err) {
+    tab?.close();
+    throw err;
+  }
 }

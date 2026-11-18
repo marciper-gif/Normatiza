@@ -31,6 +31,7 @@
 const { initializeApp } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
+const { getStorage } = require('firebase-admin/storage');
 const { onDocumentWritten } = require('firebase-functions/v2/firestore');
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { defineSecret } = require('firebase-functions/params');
@@ -68,7 +69,9 @@ const DEFAULT_COMPANY_ID = 'acii';
 // src/lib/tenant.ts.
 const PLATFORM_COMPANY_ID = '__platform__';
 
-initializeApp({ projectId: PROJECT_ID });
+const STORAGE_BUCKET = 'dogwood-loader-bln7n.firebasestorage.app';
+
+initializeApp({ projectId: PROJECT_ID, storageBucket: STORAGE_BUCKET });
 
 let firestoreInstance = null;
 function db() {
@@ -1130,5 +1133,101 @@ exports.confirmPasswordReset = onCall({ region: REGION }, async (request) => {
     logger.error('❌ ERRO NA FUNÇÃO CONFIRMPASSWORDRESET:', err);
     if (err instanceof HttpsError) throw err;
     throw new HttpsError('internal', `Erro ao redefinir senha [${err.code || 'ERRO'}]: ${err.message || 'Erro inesperado'}`);
+  }
+});
+
+/**
+ * getDocumentDownloadUrl({ documentId, version? })
+ * ─────────────────────────────────────────────────────────────────────
+ * Único caminho de leitura de arquivos do módulo de guarda de documentos.
+ * Antes, o cliente gravava no Firestore o link de download com token
+ * permanente (getDownloadURL) e o usava direto — quem tivesse o link
+ * baixava o arquivo SEM passar pelo storage.rules (nem pela checagem de
+ * empresa), e extraViewerSectorIds nunca era checado no Storage (o
+ * storage.rules não consegue consultar o Firestore nomeado). Agora a
+ * permissão é conferida aqui, no servidor, com o mesmo critério do
+ * firestore.rules (guarded_documents: MESMA empresa e, dentro dela, admin,
+ * setor dono ou setor em extraViewerSectorIds), e o retorno é uma URL
+ * assinada que expira em poucos minutos.
+ */
+const SIGNED_URL_TTL_MS = 5 * 60 * 1000;
+
+exports.getDocumentDownloadUrl = onCall({ region: REGION }, async (request) => {
+  try {
+    if (!request.auth) {
+      throw new HttpsError('unauthenticated', 'Sessão inválida. Faça login novamente.');
+    }
+    const documentId = String(request.data?.documentId || '').trim();
+    const version = request.data?.version != null ? Number(request.data.version) : null;
+    if (!documentId) {
+      throw new HttpsError('invalid-argument', 'Documento não informado.');
+    }
+
+    const firestore = db();
+    const linkSnap = await firestore.collection('auth_links').doc(request.auth.uid).get();
+    if (!linkSnap.exists) {
+      throw new HttpsError('permission-denied', 'Sessão sem vínculo de usuário. Faça login novamente.');
+    }
+    const link = linkSnap.data();
+
+    const docSnap = await firestore.collection('guarded_documents').doc(documentId).get();
+    if (!docSnap.exists) {
+      throw new HttpsError('not-found', 'Documento não encontrado.');
+    }
+    const document = docSnap.data();
+
+    // Mesma regra de fallback usada em syncAuthLinkClaims/login: documento
+    // ou vínculo ainda sem companyId pertencem ao primeiro tenant.
+    const callerCompanyId = link.companyId ?? DEFAULT_COMPANY_ID;
+    const documentCompanyId = document.companyId ?? DEFAULT_COMPANY_ID;
+    if (callerCompanyId !== documentCompanyId) {
+      // Não revela que o documento existe em outra empresa.
+      throw new HttpsError('not-found', 'Documento não encontrado.');
+    }
+
+    const extra = Array.isArray(document.extraViewerSectorIds) ? document.extraViewerSectorIds : [];
+    const allowed =
+      link.role === 'admin' ||
+      (link.sectorId && link.sectorId === document.sectorId) ||
+      (link.sectorId && extra.includes(link.sectorId));
+    if (!allowed) {
+      throw new HttpsError('permission-denied', 'Sem permissão para acessar este documento.');
+    }
+
+    let target = document;
+    if (version != null && version !== document.version) {
+      target = (document.previousVersions || []).find((v) => v.version === version);
+      if (!target) {
+        throw new HttpsError('not-found', 'Versão não encontrada.');
+      }
+    }
+
+    // Defesa em profundidade: o caminho vem do Firestore, mas só serve se
+    // estiver dentro da pasta esperada do documento (formato atual com
+    // empresa, ou o legado sem empresa, de antes da migração).
+    const storagePath = String(target.storagePath || '');
+    const allowedPrefixes = [
+      `documentos/${documentCompanyId}/${document.sectorId}/${documentId}/`,
+      `documentos/${document.sectorId}/${documentId}/`
+    ];
+    if (!allowedPrefixes.some((p) => storagePath.startsWith(p)) || storagePath.includes('..')) {
+      throw new HttpsError('failed-precondition', 'Arquivo indisponível.');
+    }
+
+    const [url] = await getStorage()
+      .bucket(STORAGE_BUCKET)
+      .file(storagePath)
+      .getSignedUrl({
+        version: 'v4',
+        action: 'read',
+        expires: Date.now() + SIGNED_URL_TTL_MS,
+        responseDisposition: `inline; filename*=UTF-8''${encodeURIComponent(target.fileName || 'documento')}`
+      });
+
+    return { url };
+  } catch (err) {
+    logger.error('❌ ERRO NA FUNÇÃO GETDOCUMENTDOWNLOADURL:', err);
+    if (err instanceof HttpsError) throw err;
+    throw new HttpsError('internal', `Erro ao gerar link de download [${err.code || 'ERRO'}]: ${err.message || 'Erro inesperado'}`);
   }
 });

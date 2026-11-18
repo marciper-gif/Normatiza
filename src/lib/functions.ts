@@ -50,3 +50,11 @@ export const enterCompanyCallable = httpsCallable(functions, 'enterCompany');
 // daquele link.
 export const requestPasswordResetCallable = httpsCallable(functions, 'requestPasswordReset');
 export const confirmPasswordResetCallable = httpsCallable(functions, 'confirmPasswordReset');
+
+// Devolve uma URL assinada (expira em minutos) para baixar um arquivo do
+// módulo de guarda de documentos, após checar empresa/papel/setor no
+// servidor. Substitui o uso direto do fileUrl (token permanente).
+export const getDocumentDownloadUrlCallable = httpsCallable<
+  { documentId: string; version?: number },
+  { url: string }
+>(functions, 'getDocumentDownloadUrl');
