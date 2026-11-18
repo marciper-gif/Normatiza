@@ -382,6 +382,7 @@ exports.linkGoogleUser = onCall({ region: REGION }, async (request) => {
       username: emailLower.split('@')[0],
       name: displayName,
       role,
+      authProvider: 'google',
       employeeId: employeeId || FieldValue.delete(),
       updatedAt: FieldValue.serverTimestamp()
     };
@@ -402,6 +403,7 @@ exports.linkGoogleUser = onCall({ region: REGION }, async (request) => {
         username: userDataToSave.username,
         name: displayName,
         role,
+        authProvider: 'google',
         employeeId: employeeId || null
       }
     };

@@ -105,6 +105,7 @@ export interface UserAccount {
   primeiro_acesso?: boolean;
   firstAccess?: boolean;
   lastPasswordChange?: string;
+  authProvider?: 'google'; // preenchido por linkGoogleUser; ausente = login por CPF/senha
 }
 
 export interface ProfilePermissionItem {

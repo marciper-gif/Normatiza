@@ -17,16 +17,14 @@ import { loadStoredProfilePermissions, resolveUserPermissions } from '../lib/per
 export function useAuthSession() {
   const [users, rawSetUsers] = useState<UserAccount[]>(() => {
     const saved = localStorage.getItem('ms-users');
-    if (!saved) {
-      const defaultUsers: UserAccount[] = [
-        { id: '1', username: 'admin', name: 'Administrador Geral', password: 'admin', role: 'admin', status: 'Ativo', primeiro_acesso: false },
-        { id: '2', username: 'colaborador', name: 'Colaborador Padrão', password: '123', role: 'colaborador', status: 'Ativo', primeiro_acesso: true }
-      ];
-      localStorage.setItem('ms-users', JSON.stringify(defaultUsers));
-      return defaultUsers;
-    }
+    // Sem contas padrão locais: as contas reais vêm do Firestore (login
+    // validado na Cloud Function `login`). As antigas contas admin/admin e
+    // colaborador/123 guardavam senha em texto puro no navegador.
+    if (!saved) return [];
     try {
-      return JSON.parse(saved);
+      // Remove senha em texto puro que versões antigas deixaram em cache.
+      const parsed: UserAccount[] = JSON.parse(saved);
+      return parsed.map(({ password: _legacyPassword, ...rest }) => rest as UserAccount);
     } catch (e) {
       return [];
     }
@@ -193,7 +191,7 @@ export function useAuthSession() {
         try {
           const result = await linkGoogleUserCallable();
           const data = result.data as { success: boolean; userId: string; userData: UserAccount };
-          const googleUserAccount = data.userData;
+          const googleUserAccount: UserAccount = { ...data.userData, authProvider: 'google' };
 
           rawSetUsers(prev => {
             if (!prev.some(u => u.id === googleUserAccount.id)) {
@@ -221,7 +219,11 @@ export function useAuthSession() {
 
         // If logged out from Firebase Auth, only reset currentUser if they were a Google user
         setCurrentUser(prev => {
-          if (prev && !prev.password) {
+          // Só desloga quem entrou pelo Google (marcado por linkGoogleUser).
+          // Antes o critério era "não tem password", que hoje vale para
+          // TODO mundo (senhas em texto puro foram removidas) e derrubava
+          // quem entrou por CPF/senha se a sessão do Firebase caísse.
+          if (prev && prev.authProvider === 'google') {
             localStorage.removeItem('ms-current-user');
             return null;
           }
