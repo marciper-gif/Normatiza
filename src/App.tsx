@@ -2934,7 +2934,7 @@ export default function App() {
                       
                       {/* Logo and Brand */}
                       <div className="p-4 flex justify-center items-center md:col-span-1 min-h-[90px] bg-slate-50/50 dark:bg-slate-950/20">
-                        <AppLogo className="w-44 h-auto" logoUrl={companyBranding.logoUrl} primaryColor={companyBranding.primaryColor} />
+                        <AppLogo className="w-44 h-auto" logoUrl={companyBranding.logoUrl} primaryColor={companyBranding.primaryColor} companyName={companyBranding.name} />
                       </div>
 
                       {/* Header Text / Metadata fields */}
