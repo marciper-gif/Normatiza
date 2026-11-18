@@ -173,18 +173,31 @@ export async function uploadGuardedDocumentFile(
   return uploadWithRetry(file, storagePath, onProgress, onRetry, false);
 }
 
+// Tipos que o navegador consegue MOSTRAR numa aba. Os demais (Word, Excel)
+// o navegador só consegue baixar.
+const VIEWABLE_IN_BROWSER = /\.(pdf|png|jpe?g)$/i;
+
 /**
- * Abre um arquivo do módulo de guarda via URL assinada de curta duração,
- * emitida pelo servidor só depois de conferir empresa/papel/setor. A aba
- * é aberta de forma síncrona (no clique) e só depois recebe a URL, para o
- * bloqueador de pop-ups do navegador não impedir.
+ * Abre (PDF/imagem) ou baixa (Word/Excel) um arquivo do módulo de guarda
+ * via URL assinada de curta duração, emitida pelo servidor só depois de
+ * conferir empresa/papel/setor.
+ *
+ * - PDF/imagem: a aba é aberta de forma síncrona (no clique) e só depois
+ *   recebe a URL, para o bloqueador de pop-ups do navegador não impedir.
+ * - Word/Excel: NÃO abre aba nova — antes, a aba ficava em branco porque o
+ *   navegador transformava a navegação em download. O download é disparado
+ *   na própria página, que continua onde estava.
  */
-export async function openGuardedDocument(documentId: string, version?: number): Promise<void> {
-  const tab = window.open('', '_blank');
+export async function openGuardedDocument(documentId: string, version?: number, fileName?: string): Promise<void> {
+  const viewable = !fileName || VIEWABLE_IN_BROWSER.test(fileName);
+  const tab = viewable ? window.open('', '_blank') : null;
   try {
     const { data } = await getDocumentDownloadUrlCallable({ documentId, version });
-    if (tab) tab.location.href = data.url;
-    else window.location.href = data.url;
+    if (tab) {
+      tab.location.href = data.url;
+    } else {
+      window.location.assign(data.url);
+    }
   } catch (err) {
     tab?.close();
     throw err;

@@ -286,15 +286,15 @@ export default function DocumentsView({
     }
   };
 
-  const handleOpenFile = (docId: string, version?: number) => {
-    openGuardedDocument(docId, version).catch(err => {
+  const handleOpenFile = (docId: string, version?: number, fileName?: string) => {
+    openGuardedDocument(docId, version, fileName).catch(err => {
       console.error('Erro ao abrir documento:', err);
       alert(err?.message || 'Não foi possível abrir o documento.');
     });
   };
 
   const handleDownloadClick = (doc: GuardedDocument) => {
-    handleOpenFile(doc.id);
+    handleOpenFile(doc.id, undefined, doc.fileName);
     const nowIso = new Date().toISOString();
     const updated: GuardedDocument = {
       ...doc,
@@ -588,7 +588,7 @@ export default function DocumentsView({
                         <span className="text-slate-400 mx-1.5">•</span>
                         <span className="text-slate-500 dark:text-slate-400">{formatDate(v.uploadedAt)}</span>
                       </div>
-                      <button type="button" onClick={() => handleOpenFile(historyDoc.id, v.version)} className="text-sky-600 dark:text-sky-400 hover:underline shrink-0 ml-2">
+                      <button type="button" onClick={() => handleOpenFile(historyDoc.id, v.version, v.fileName)} className="text-sky-600 dark:text-sky-400 hover:underline shrink-0 ml-2">
                         Baixar
                       </button>
                     </div>
