@@ -15,14 +15,33 @@ interface AppLogoProps {
   className?: string;
   logoUrl?: string;
   primaryColor?: string;
+  // Nome da empresa (Identidade Visual). Sem logo enviado, o cabeçalho do
+  // documento mostra o NOME DA EMPRESA no lugar da marca do produto — a
+  // marca "Normatiza" só aparece quando a empresa não tem nem logo nem nome.
+  companyName?: string;
 }
 
-export default function AppLogo({ className = "w-full h-auto", logoUrl, primaryColor }: AppLogoProps) {
+export default function AppLogo({ className = "w-full h-auto", logoUrl, primaryColor, companyName }: AppLogoProps) {
   if (logoUrl) {
     return <img src={logoUrl} alt="Logo da empresa" className={`${className} object-contain`} />;
   }
 
   const accent = primaryColor || '#10b981'; // emerald-500, cor padrão do produto
+
+  const name = (companyName || '').trim();
+  if (name) {
+    return (
+      <div className={`${className} flex flex-col items-start justify-center`}>
+        <span className="font-black leading-tight tracking-tight text-slate-900 dark:text-white text-2xl break-words max-w-full font-display">
+          {name}
+        </span>
+        <span className="block h-[5px] w-12 rounded-full mt-1.5" style={{ backgroundColor: accent }} />
+        <span className="mt-2 text-[9px] font-bold tracking-[0.12em] text-slate-500 dark:text-slate-400">
+          CONTROLE DE DOCUMENTOS E PROCESSOS
+        </span>
+      </div>
+    );
+  }
 
   return (
     <svg viewBox="0 0 280 90" className={className} xmlns="http://www.w3.org/2000/svg">
