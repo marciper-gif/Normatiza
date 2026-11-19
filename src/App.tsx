@@ -44,7 +44,7 @@ import {
   Archive
 } from 'lucide-react';
 
-import { Sector, ATR, POP, POPStep, UserAccount, SectorData, Employee, ProfilePermissions, IT, RevisionHistoryEntry } from './types';
+import { Sector, ATR, POP, POPStep, UserAccount, SectorData, Employee, ProfilePermissions, IT, RevisionHistoryEntry, DocumentTypesSettings, DEFAULT_DOCUMENT_TYPES_SETTINGS } from './types';
 import { exportElementToPdf } from './utils/pdfExport';
 import { initialATRs } from './data/atrs';
 import { initialPOPs } from './data/pops';
@@ -58,11 +58,13 @@ import SectorManager from './components/SectorManager';
 import GoogleWorkspaceManager from './components/GoogleWorkspaceManager';
 import SplashScreen from './components/SplashScreen';
 import DocumentsView from './components/DocumentsView';
-import ACIILogo from './components/ACIILogo';
+import AppLogo from './components/AppLogo';
+import CompanyOnboardingModal from './components/CompanyOnboardingModal';
+import OnboardingChecklist from './components/OnboardingChecklist';
 
 // Firebase Integrations
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { onSnapshot, collection, doc, getDoc } from 'firebase/firestore';
+import { onSnapshot, collection, doc, getDoc, query, where } from 'firebase/firestore';
 import { auth, db, ensureAnonymousAuth } from './lib/firebase';
 import { linkGoogleUserCallable } from './lib/functions';
 import { hashPassword } from './lib/userManagement';
@@ -80,7 +82,9 @@ import {
   dbDeleteIT,
   dbSaveUserAccount,
   dbDeleteUserAccount,
-  dbSavePermissions
+  dbSavePermissions,
+  dbSaveCompanyDocumentTypes,
+  dbSaveCompanyBranding
 } from './lib/firebaseSync';
 import { getReviewStatus } from './utils/documentReview';
 import { ViewType, DocType, VIEW_PATHS, computeAppPath, parseAppPath } from './lib/appRouting';
@@ -90,6 +94,17 @@ import { usePopsState } from './hooks/usePopsState';
 import { useItsState } from './hooks/useItsState';
 import { useSectorsState } from './hooks/useSectorsState';
 import { useEmployeesState } from './hooks/useEmployeesState';
+import { DEFAULT_COMPANY_ID, PLATFORM_COMPANY_ID, setCurrentCompanyId } from './lib/tenant';
+import PlatformAdminHome from './components/PlatformAdminHome';
+
+// Fase 3 (onboarding): só este e-mail Google pode abrir o cadastro de
+// nova empresa — precisa bater com RUNTIME_ADMIN_EMAIL em
+// functions/index.js (mesmo cuidado de duplicação já usado pra
+// FIRESTORE_DATABASE_ID/PROJECT_ID entre cliente e servidor neste
+// projeto). Esconder o botão aqui é só conveniência de UI: quem garante
+// a segurança de verdade é a própria Cloud Function `createCompany`,
+// que confere isso de novo no servidor.
+const PLATFORM_OWNER_EMAIL = 'marciper@gmail.com';
 
 export { getReviewStatus };
 
@@ -151,7 +166,33 @@ export default function App() {
   // `request.auth != null`.
   const [authReady, setAuthReady] = useState(false);
 
+  // Fase 1 (multiempresa): empresa (tenant) da sessão atual, derivada do
+  // usuário logado. Contas ainda não migradas (companyId ausente) caem no
+  // primeiro tenant, a própria ACII — ver DEFAULT_COMPANY_ID em
+  // src/lib/tenant.ts e functions/migrate-add-company-id.js. Espelhado no
+  // módulo tenant.ts (singleton) logo abaixo, pra quem grava no Firestore
+  // (src/lib/firebaseSync.ts) sem precisar receber companyId por parâmetro.
+  //
+  // Propositalmente `null` ANTES do login (currentUser ainda null): as
+  // Firestore Rules agora exigem que o companyId do documento bata com o
+  // da sessão (auth_links/{uid}.companyId), e esse vínculo só existe DEPOIS
+  // do login (Cloud Function `login`/`linkGoogleUser`) — não na sessão
+  // anônima-ponte que existe antes disso. Um companyId "chutado" aqui
+  // antes do login não leria nada mesmo (regras negam), só geraria erros
+  // de permissão previsíveis na tela de login. Os hooks abaixo já tratam
+  // companyId === null como "ainda não assina nada".
+  const companyId = currentUser ? (currentUser.companyId || DEFAULT_COMPANY_ID) : null;
+  useEffect(() => {
+    setCurrentCompanyId(companyId);
+  }, [companyId]);
+
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
+  const [isCompanyOnboardingOpen, setIsCompanyOnboardingOpen] = useState(false);
+  // auth.currentUser reflete a sessão do Firebase Auth (anônima OU
+  // Google) — só quando é Google é que carrega e-mail de verdade. currentUser
+  // (UserAccount) não tem e-mail de login aqui, por isso a checagem é
+  // separada, direto na sessão do Firebase Auth.
+  const isPlatformOwner = (auth.currentUser?.email || '').toLowerCase() === PLATFORM_OWNER_EMAIL;
 
   const [profilePermissions, rawSetProfilePermissions] = useState<ProfilePermissions>(() => {
     const saved = localStorage.getItem('ms-profile-permissions');
@@ -221,6 +262,51 @@ export default function App() {
     localStorage.setItem('ms-profile-permissions', JSON.stringify(newPerms));
   };
 
+  // Fase 2 (tipos de documento configuráveis por empresa): estado local
+  // com os defaults do produto (ATR/POP/IT/Documentos, todos habilitados)
+  // até o Firestore responder — ver listener em companies/{companyId}
+  // logo abaixo, e src/types.ts (DEFAULT_DOCUMENT_TYPES_SETTINGS).
+  const [documentTypesSettings, setDocumentTypesSettingsRaw] = useState<DocumentTypesSettings>(DEFAULT_DOCUMENT_TYPES_SETTINGS);
+
+  // Fase 4 (rebranding) — identidade visual da empresa atual (nome, logo,
+  // cor principal). Ver dbSaveCompanyBranding em src/lib/firebaseSync.ts
+  // e a aba "Identidade Visual" em AdminUsersModal.tsx.
+  const [companyBranding, setCompanyBranding] = useState<{ name: string; logoUrl: string; primaryColor: string }>({
+    name: '',
+    logoUrl: '',
+    primaryColor: ''
+  });
+
+  const handleUpdateCompanyBranding = (branding: { name: string; logoUrl: string; primaryColor: string }) => {
+    setCompanyBranding(branding);
+    dbSaveCompanyBranding(branding, currentUser).catch(err => {
+      console.error('Falha ao salvar identidade visual da empresa:', err);
+      alert('⚠️ Não foi possível salvar a identidade visual. Verifique sua conexão e tente novamente.');
+    });
+  };
+
+  const handleUpdateDocumentTypesSettings = (settings: DocumentTypesSettings) => {
+    setDocumentTypesSettingsRaw(settings);
+    dbSaveCompanyDocumentTypes(settings, currentUser).catch(err => {
+      console.error('Falha ao salvar configuração de tipos de documento:', err);
+      alert('⚠️ Não foi possível salvar a configuração de tipos de documento. Verifique sua conexão e tente novamente.');
+    });
+  };
+
+  // Nome de exibição configurado pela empresa (Fase 2) pra cada tipo de
+  // documento — usado nos pontos "estruturais" da tela (chips de filtro,
+  // título do visualizador, seletor de tipo ao criar um documento). NÃO
+  // cobre ainda os textos dentro dos formulários de cada tipo (ex.: rótulo
+  // de campo "Objetivo da Instrução de Trabalho") — ver aviso na aba
+  // "Tipos de Documento" do painel admin.
+  const docTypeLabel = useCallback((key: 'pop' | 'atr' | 'it' | 'guarded'): string => {
+    return documentTypesSettings[key]?.label || DEFAULT_DOCUMENT_TYPES_SETTINGS[key].label;
+  }, [documentTypesSettings]);
+
+  const isDocTypeEnabled = useCallback((key: 'pop' | 'atr' | 'it' | 'guarded'): boolean => {
+    return documentTypesSettings[key]?.enabled ?? true;
+  }, [documentTypesSettings]);
+
 
   const userPermissions = useMemo(() => {
     if (!currentUser) {
@@ -284,6 +370,10 @@ export default function App() {
 
   const handleLogin = (user: UserAccount) => {
     setCurrentUser(user);
+    // Grava síncrono (não espera o useEffect de `companyId` rodar) porque
+    // seedDatabaseIfEmpty/dbSaveX podem ser chamados logo em seguida, antes
+    // do próximo render — ver src/lib/tenant.ts.
+    setCurrentCompanyId(user.companyId || DEFAULT_COMPANY_ID);
     localStorage.setItem('ms-current-user', JSON.stringify(user));
 
     // A Cloud Function `login` (chamada dentro de fazerLogin, em
@@ -305,13 +395,13 @@ export default function App() {
   // Documents Management (Predefined + Local Drafts) e Setores: cada um
   // com estado + persistência em localStorage + sincronização em tempo
   // real com o Firestore isolados no próprio hook (ver src/hooks/).
-  const [atrs, setATRs] = useAtrsState(authReady);
-  const [pops, setPOPs] = usePopsState(authReady);
-  const [its, setITs] = useItsState(authReady);
-  const [sectors, setSectors] = useSectorsState(authReady);
+  const [atrs, setATRs] = useAtrsState(authReady, companyId);
+  const [pops, setPOPs] = usePopsState(authReady, companyId);
+  const [its, setITs] = useItsState(authReady, companyId);
+  const [sectors, setSectors] = useSectorsState(authReady, companyId);
 
   // Dynamic employees state - only preserving employees created in the system
-  const [employees, setEmployees] = useEmployeesState(authReady);
+  const [employees, setEmployees, employeesLoading] = useEmployeesState(authReady, companyId);
 
   // (a persistência de `sectors` em localStorage já roda dentro de
   // useSectorsState — esta era mais uma gravação idêntica, removida)
@@ -426,12 +516,13 @@ export default function App() {
           });
 
           setCurrentUser(googleUserAccount);
+          setCurrentCompanyId(googleUserAccount.companyId || DEFAULT_COMPANY_ID);
           localStorage.setItem('ms-current-user', JSON.stringify(googleUserAccount));
         } catch (e) {
           console.error('Falha ao vincular sessão do Google:', e);
         }
 
-        // Seed DB if empty
+        // Seed DB if empty (já usa o companyId acabado de definir)
         await seedDatabaseIfEmpty();
       } else {
         // Nenhuma sessão do Firebase Auth ainda: cria uma anônima para que
@@ -454,22 +545,48 @@ export default function App() {
     });
 
     return () => unsubscribe();
-  }, [employees, sectors]);
+    // Sem employees/sectors nas deps: nenhum dos dois é usado aqui dentro.
+    // Antes, listá-los fazia este efeito reinscrever o onAuthStateChanged
+    // toda vez que esses estados carregavam — e o Firebase dispara o
+    // callback de novo ao reinscrever, rerodando linkGoogleUserCallable.
+    // Pro dono da plataforma (RUNTIME_ADMIN_EMAIL) isso sempre resolve de
+    // volta pra PLATFORM_COMPANY_ID (ver linkGoogleUser em
+    // functions/index.js), desfazendo o enterCompany 1s depois de entrar
+    // numa empresa — exatamente o sintoma reportado.
+  }, []);
 
   // Synchronize collections with Firestore for real-time multi-device persistence
   useEffect(() => {
     // Espera existir sessão do Firebase Auth (mesmo anônima) antes de abrir
-    // qualquer listener — as Firestore Rules agora exigem request.auth.
-    if (!db || !authReady) return;
+    // qualquer listener — as Firestore Rules agora exigem request.auth. A
+    // partir da Fase 1 (multiempresa), também espera `companyId` (só
+    // existe depois do login de verdade — ver comentário na declaração de
+    // `companyId` acima): as regras passam a exigir que o companyId do
+    // documento bata com o de auth_links/{uid}, que só é gravado pelas
+    // Cloud Functions login/linkGoogleUser.
+    // Sentinela do dono da plataforma (ver PLATFORM_COMPANY_ID em
+    // src/lib/tenant.ts): não é uma empresa de verdade, então não existe
+    // nenhum dado pra assinar — a tela neutra (PlatformAdminHome) cuida de
+    // tudo sozinha. Tentar abrir estes listeners contra a sentinela só
+    // geraria permission-denied inútil nas Firestore Rules.
+    if (!db || !authReady || !companyId || companyId === PLATFORM_COMPANY_ID) return;
+
+    // Mesmo bug de classe já corrigido abaixo pra `users` (ver comentário
+    // grande logo ali): ao trocar de empresa no mesmo navegador sem recarregar
+    // a página, `companyBranding` ficava com os dados da empresa ANTERIOR
+    // até o snapshot de `companies/{companyId}` da empresa nova responder —
+    // uma janela pequena, mas real, em que a tela (e o AdminUsersModal, via
+    // brandingDraft) exibia nome/logo/cor de outra empresa. Limpo aqui, no
+    // início do efeito, antes até de assinar o documento da empresa nova.
+    setCompanyBranding({ name: '', logoUrl: '', primaryColor: '' });
 
     // Seed database if empty on load
     seedDatabaseIfEmpty();
 
     // Setores, funcionários, ATRs, POPs e ITs têm cada um seu próprio hook
     // agora (ver src/hooks/) — estado, persistência em localStorage e
-    // assinatura do Firestore isolados, sem depender deste efeito nem de
-    // `currentUser` (só de `authReady`, que é tudo que eles realmente
-    // precisam).
+    // assinatura do Firestore isolados, sem depender deste efeito.
+    // Recebem `companyId` explicitamente (Fase 1), além de `authReady`.
 
     // guarded_documents NÃO tem mais um listener global aqui — ver
     // comentário na declaração do estado (removida), mais acima.
@@ -482,55 +599,46 @@ export default function App() {
     // assina o PRÓPRIO registro logo abaixo (unsubOwnUser).
     const isAccountManager = currentUser?.role === 'admin' || currentUser?.role === 'gestor' || currentUser?.role === 'lider';
 
+    // FASE 1 (bug encontrado depois de publicado) — os dois listeners
+    // abaixo mesclavam a resposta do Firestore em cima do estado ANTERIOR
+    // (`prev`), igual o bug já corrigido em useEmployeesState.ts. `users`
+    // inicializa lendo `localStorage.getItem('ms-users')` (chave GLOBAL,
+    // sem escopo por empresa) — ao trocar de empresa no mesmo navegador,
+    // a lista de usuários (com hash de senha!) de uma empresa anterior
+    // entrava como `prev` e nunca era removida, porque um usuário que
+    // nunca pertenceu à consulta da empresa nova jamais gera evento de
+    // remoção. Corrigido substituindo o estado inteiro a cada resposta,
+    // nunca mesclando com o que já estava lá.
     const unsubUsers = isAccountManager
-      ? onSnapshot(collection(db, 'users'), (snapshot) => {
+      ? onSnapshot(query(collection(db, 'users'), where('companyId', '==', companyId)), (snapshot) => {
           const list: UserAccount[] = [];
           snapshot.forEach((doc) => {
             list.push(doc.data() as UserAccount);
           });
-          if (list.length > 0) {
-            rawSetUsers(prev => {
-              const map = new Map<string, UserAccount>();
-              prev.forEach(item => map.set(item.id, item));
-              list.forEach(item => {
-                const existingKey = Array.from(map.keys()).find(k =>
-                  k === item.id ||
-                  (map.get(k)?.username && item.username && map.get(k)!.username.toLowerCase() === item.username.toLowerCase())
-                );
-                if (existingKey) {
-                  map.delete(existingKey);
-                }
-                map.set(item.id, item);
-              });
-              const result = Array.from(map.values());
-              localStorage.setItem('ms-users', JSON.stringify(result));
-              return result;
-            });
-          }
+          rawSetUsers(list);
+          localStorage.setItem('ms-users', JSON.stringify(list));
         }, (err) => {
           console.warn("Firestore snapshot error (users):", err);
         })
       : () => {};
 
+    // Colaborador/quem não gerencia contas só enxerga o PRÓPRIO registro
+    // (rules não liberam mais — ver firestore.rules), então `users` aqui
+    // vira sempre um array de um item só, nunca mesclado com o anterior.
     const unsubOwnUser = (!isAccountManager && currentUser)
       ? onSnapshot(doc(db, 'users', currentUser.id), (docSnap) => {
           if (!docSnap.exists()) return;
           const updated = docSnap.data() as UserAccount;
-          rawSetUsers(prev => {
-            const map = new Map<string, UserAccount>();
-            prev.forEach(item => map.set(item.id, item));
-            map.set(updated.id, updated);
-            const result = Array.from(map.values());
-            localStorage.setItem('ms-users', JSON.stringify(result));
-            return result;
-          });
+          rawSetUsers([updated]);
+          localStorage.setItem('ms-users', JSON.stringify([updated]));
         }, (err) => {
           console.warn("Firestore snapshot error (own user):", err);
         })
       : () => {};
 
-    // Real-time Permissions subscription
-    const unsubPermissions = onSnapshot(doc(db, 'permissions', 'default'), (docSnap) => {
+    // Real-time Permissions subscription — um documento por empresa desde
+    // a Fase 1 (era um único `permissions/default` global antes).
+    const unsubPermissions = onSnapshot(doc(db, 'permissions', companyId), (docSnap) => {
       if (docSnap.exists()) {
         rawSetProfilePermissions(docSnap.data() as ProfilePermissions);
       }
@@ -538,12 +646,39 @@ export default function App() {
       console.warn("Firestore snapshot error (permissions):", err);
     });
 
+    // Real-time Company subscription (Fase 2 — tipos de documento
+    // configuráveis). Documento sem `documentTypes` ainda (empresa nunca
+    // configurou nada) cai nos defaults do produto — mescla, não
+    // substitui, pra uma configuração PARCIAL salva não apagar os tipos
+    // que a empresa nunca chegou a mexer.
+    const unsubCompany = onSnapshot(doc(db, 'companies', companyId), (docSnap) => {
+      const data = docSnap.exists() ? docSnap.data() : undefined;
+      const saved = data?.documentTypes as Partial<DocumentTypesSettings> | undefined;
+      setDocumentTypesSettingsRaw({
+        atr: { ...DEFAULT_DOCUMENT_TYPES_SETTINGS.atr, ...saved?.atr },
+        pop: { ...DEFAULT_DOCUMENT_TYPES_SETTINGS.pop, ...saved?.pop },
+        it: { ...DEFAULT_DOCUMENT_TYPES_SETTINGS.it, ...saved?.it },
+        guarded: { ...DEFAULT_DOCUMENT_TYPES_SETTINGS.guarded, ...saved?.guarded }
+      });
+      // Fase 4 (rebranding): identidade visual da empresa — nome, logo,
+      // cor principal. Sem nada configurado ainda, cai em branco e cada
+      // tela decide o próprio fallback genérico ("Normatiza").
+      setCompanyBranding({
+        name: data?.name || '',
+        logoUrl: data?.logoUrl || '',
+        primaryColor: data?.primaryColor || ''
+      });
+    }, (err) => {
+      console.warn("Firestore snapshot error (company):", err);
+    });
+
     return () => {
       unsubUsers();
       unsubOwnUser();
       unsubPermissions();
+      unsubCompany();
     };
-  }, [currentUser, authReady]);
+  }, [currentUser, authReady, companyId]);
 
   // Check if a user has access to a document (Colaborador = only explicitly linked, Gestor = explicitly linked + sector/group, Admin = all)
   const userHasAccessToDoc = useCallback((doc: ATR | POP | IT, docType: 'atr' | 'pop' | 'it') => {
@@ -617,9 +752,19 @@ export default function App() {
         // Check if employee already has a linked user account
         const hasAccount = currentUsers.some(u => u.employeeId === emp.id);
         if (!hasAccount) {
-          // Create standard account: username = normalized name, password = '123'
-          const baseUsername = normalizeUsername(emp.name);
-          // Ensure username is unique
+          // Create standard account: username = normalized name, password = '123'.
+          // Fase 3 (multiempresa de verdade): login é único no SISTEMA
+          // INTEIRO (ver comentário em functions/index.js, exports.
+          // createCompany), mas esta checagem só enxerga os usuários JÁ
+          // CARREGADOS da própria empresa (`currentUsers` vem do estado
+          // `users`, que desde a Fase 1 só assina a própria empresa). Pra
+          // não colidir por baixo dos panos com "joao.silva" de OUTRA
+          // empresa (nome comum, bem provável de repetir), empresas que
+          // não a ACII levam o companyId como sufixo de propósito — mesma
+          // lógica do seed em seedDatabaseIfEmpty (src/lib/firebaseSync.ts).
+          const usernameSuffix = companyId && companyId !== DEFAULT_COMPANY_ID ? `.${companyId}` : '';
+          const baseUsername = `${normalizeUsername(emp.name)}${usernameSuffix}`;
+          // Ensure username is unique dentro do que já vemos
           let finalUsername = baseUsername;
           let counter = 1;
           while (currentUsers.some(u => u.username.toLowerCase() === finalUsername.toLowerCase())) {
@@ -832,6 +977,15 @@ export default function App() {
   // Form Modal States
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [formDocType, setFormDocType] = useState<'pop' | 'atr' | 'it'>('pop');
+
+  // Fase 2 — segurança contra o tipo selecionado no modal de criação ficar
+  // "preso" num tipo que a empresa acabou de desativar (o cartão some do
+  // seletor, mas sem isto o formDocType continuaria valendo por baixo).
+  useEffect(() => {
+    if (isDocTypeEnabled(formDocType)) return;
+    const fallback = (['pop', 'atr', 'it'] as const).find(t => isDocTypeEnabled(t));
+    if (fallback) setFormDocType(fallback);
+  }, [documentTypesSettings, formDocType, isDocTypeEnabled]);
   const [editingId, setFormEditingId] = useState<string | null>(null);
   const [initialContentSignature, setInitialContentSignature] = useState<string>('');
 
@@ -883,7 +1037,7 @@ export default function App() {
   const handleDeleteDoc = (id: string, type: 'pop' | 'atr' | 'it') => {
     if (confirm(`Deseja realmente excluir o documento ${id}?`)) {
       if (type === 'atr') {
-        dbDeleteATR(id);
+        dbDeleteATR(id, companyId);
         const filtered = atrs.filter(a => a.id !== id);
         setATRs(filtered);
         if (selectedDocId === id) {
@@ -892,7 +1046,7 @@ export default function App() {
           setSelectedDocType(next ? (next.id.startsWith('POP-') ? 'pop' : next.id.startsWith('IT-') ? 'it' : 'atr') : 'pop');
         }
       } else if (type === 'pop') {
-        dbDeletePOP(id);
+        dbDeletePOP(id, companyId);
         const filtered = pops.filter(p => p.id !== id);
         setPOPs(filtered);
         if (selectedDocId === id) {
@@ -901,7 +1055,7 @@ export default function App() {
           setSelectedDocType(next ? (next.id.startsWith('POP-') ? 'pop' : next.id.startsWith('IT-') ? 'it' : 'atr') : 'pop');
         }
       } else {
-        dbDeleteIT(id);
+        dbDeleteIT(id, companyId);
         const filtered = its.filter(i => i.id !== id);
         setITs(filtered);
         if (selectedDocId === id) {
@@ -1315,20 +1469,34 @@ export default function App() {
     setKeepRevisionOnEdit(false);
   };
 
+  // ─────────────────────────────────────────────────────────────────
+  // Gera o próximo código sequencial (POP-001, Atr-001, IT-001...) —
+  // achado depois de publicado: calcular o número só olhando os
+  // documentos DA PRÓPRIA empresa sempre dava "001" pro primeiro POP/
+  // ATR/IT de QUALQUER empresa nova, colidindo com o código sem sufixo
+  // que a ACII já usa de verdade (ex.: POP-001 real da ACII) — a coleção
+  // é compartilhada entre empresas, só o campo companyId separa. Isso
+  // fica resolvido por trás agora: tenantDocPath (src/lib/tenant.ts)
+  // grava cada empresa (que não a ACII) num endereço real diferente no
+  // Firestore (companyId + código), então o CÓDIGO aqui continua limpo
+  // — sem sufixo nenhum, sempre — mesmo repetindo entre empresas.
+  // ─────────────────────────────────────────────────────────────────
+  const nextSequentialId = (prefix: string, items: { id: string }[]): string => {
+    const nextIdNum = Math.max(...items.map(x => parseInt(x.id.split('-')[1]) || 0), 0) + 1;
+    return `${prefix}-${String(nextIdNum).padStart(3, '0')}`;
+  };
+
   // Open fresh modal
   const handleOpenCreateModal = (type: 'pop' | 'atr' | 'it') => {
     resetForm();
     setFormDocType(type);
     // Auto generate logical next ID
     if (type === 'atr') {
-      const nextIdNum = Math.max(...atrs.map(a => parseInt(a.id.split('-')[1]) || 0), 0) + 1;
-      setFormId(`Atr-${String(nextIdNum).padStart(3, '0')}`);
+      setFormId(nextSequentialId('Atr', atrs));
     } else if (type === 'pop') {
-      const nextIdNum = Math.max(...pops.map(p => parseInt(p.id.split('-')[1]) || 0), 0) + 1;
-      setFormId(`POP-${String(nextIdNum).padStart(3, '0')}`);
+      setFormId(nextSequentialId('POP', pops));
     } else {
-      const nextIdNum = Math.max(...its.map(i => parseInt(i.id.split('-')[1]) || 0), 0) + 1;
-      setFormId(`IT-${String(nextIdNum).padStart(3, '0')}`);
+      setFormId(nextSequentialId('IT', its));
     }
     setIsModalOpen(true);
   };
@@ -1474,25 +1642,58 @@ export default function App() {
     return <LoginView onLogin={handleLogin} users={users} onUpdateUsers={handleUpdateUsers} />;
   }
 
+  // Dono da plataforma ainda não escolheu entrar numa empresa — tela
+  // neutra (sem dados/branding de nenhum cliente), não o portal da ACII.
+  // Ver PLATFORM_COMPANY_ID em src/lib/tenant.ts.
+  if (currentUser.companyId === PLATFORM_COMPANY_ID) {
+    return (
+      <PlatformAdminHome
+        currentUser={currentUser}
+        onEnteredCompany={(updatedUser) => {
+          setCurrentUser(updatedUser);
+          setCurrentCompanyId(updatedUser.companyId || DEFAULT_COMPANY_ID);
+          localStorage.setItem('ms-current-user', JSON.stringify(updatedUser));
+        }}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-200 font-sans transition-colors duration-200 pb-12">
+    <div
+      className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-200 font-sans transition-colors duration-200 pb-12"
+      style={companyBranding.primaryColor ? ({ '--brand-primary': companyBranding.primaryColor } as React.CSSProperties) : undefined}
+    >
       
       {/* Header Bar */}
       <header className="no-print bg-white/90 dark:bg-slate-900/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 sticky top-0 z-40 shadow-xs transition-all">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 lg:h-20 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           
-          {/* Logo & Brand Info */}
+          {/* Logo & Brand Info — Fase 4: identidade da EMPRESA (nome/logo/cor
+              própria, se configurados em Identidade Visual), com "Normatiza"
+              como assinatura da plataforma por baixo. */}
           <div className="flex items-center justify-between lg:justify-start gap-3 w-full lg:w-auto">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-emerald-500 rounded-xl flex items-center justify-center shadow-[0_0_15px_rgba(16,185,129,0.3)] shrink-0 text-white font-black text-sm">
-                ACII
-              </div>
+              {companyBranding.logoUrl ? (
+                <img
+                  src={companyBranding.logoUrl}
+                  alt={companyBranding.name || 'Logo da empresa'}
+                  className="w-10 h-10 rounded-xl object-contain shrink-0 bg-white/40 dark:bg-slate-800/40 border border-slate-200/60 dark:border-slate-700/60"
+                />
+              ) : (
+                <div
+                  className="w-10 h-10 rounded-xl flex items-center justify-center shadow-[0_0_15px_rgba(16,185,129,0.3)] shrink-0 text-white font-black text-sm"
+                  style={{ backgroundColor: 'var(--brand-primary)' }}
+                >
+                  {(companyBranding.name || 'Normatiza').charAt(0).toUpperCase()}
+                </div>
+              )}
               <div>
                 <h1 className="text-xs sm:text-sm md:text-base font-black tracking-tight text-slate-950 dark:text-white uppercase font-display leading-tight">
-                  Portal de Documentos ACII
+                  {companyBranding.name || 'Portal de Documentos'}
                 </h1>
                 <p className="text-[9px] sm:text-[10px] md:text-xs text-emerald-600 dark:text-emerald-450 font-black uppercase tracking-widest leading-none mt-0.5">
-                  ACII • Associação Comercial de Imperatriz
+                  Normatiza • Controle de Documentos e Processos
                 </p>
               </div>
             </div>
@@ -1573,6 +1774,7 @@ export default function App() {
                 </button>
               )}
 
+              {isDocTypeEnabled('guarded') && (
               <button
                 onClick={() => {
                   setCurrentView('documentos');
@@ -1592,8 +1794,9 @@ export default function App() {
                   />
                 )}
                 <Archive className="w-3.5 h-3.5 z-10" />
-                <span className="z-10">Documentos</span>
+                <span className="z-10">{docTypeLabel('guarded')}</span>
               </button>
+              )}
 
               <button
                 onClick={() => {
@@ -1636,11 +1839,23 @@ export default function App() {
               {(currentUser.role === 'admin' || currentUser.role === 'gestor' || currentUser.role === 'lider') && (
                 <button
                   onClick={() => setIsAdminModalOpen(true)}
-                  className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-700 rounded-lg text-[11px] flex items-center gap-1.5 transition-colors cursor-pointer font-bold shadow-[0_0_10px_rgba(16,185,129,0.2)]"
+                  className="px-2.5 py-1.5 bg-[var(--brand-primary)] hover:brightness-110 text-white border border-black/10 rounded-lg text-[11px] flex items-center gap-1.5 transition-all cursor-pointer font-bold shadow-sm"
                   title="Gerenciar Usuários e Senhas"
                 >
                   <KeyRound className="w-3.5 h-3.5" />
                   <span className="hidden sm:inline">Senhas</span>
+                </button>
+              )}
+
+              {/* Fase 3 (onboarding) — só aparece pro dono da plataforma logado via Google */}
+              {isPlatformOwner && (
+                <button
+                  onClick={() => setIsCompanyOnboardingOpen(true)}
+                  className="px-2.5 py-1.5 bg-violet-600 hover:bg-violet-500 text-white border border-violet-700 rounded-lg text-[11px] flex items-center gap-1.5 transition-colors cursor-pointer font-bold shadow-[0_0_10px_rgba(139,92,246,0.25)]"
+                  title="Cadastrar Nova Empresa"
+                >
+                  <Building className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Empresas</span>
                 </button>
               )}
 
@@ -1746,7 +1961,7 @@ export default function App() {
             </span>
           </div>
           <div className="hidden sm:flex items-center gap-2 text-slate-400 dark:text-slate-500 text-[10px]">
-            <span>ACII Imperatriz • Sistema de Controle de Processos</span>
+            <span>{companyBranding.name || 'Normatiza'} • Sistema de Controle de Documentos e Processos</span>
           </div>
         </div>
       </div>
@@ -1808,8 +2023,9 @@ export default function App() {
           >
         
         {currentView === 'employees' ? (
-          <EmployeeManager 
+          <EmployeeManager
             employees={employees}
+            employeesLoading={employeesLoading}
             setEmployees={setEmployees}
             sectors={sectors}
             pops={pops}
@@ -1830,6 +2046,7 @@ export default function App() {
             employees={employees}
             pops={pops}
             atrs={atrs}
+            companyId={companyId}
           />
         ) : currentView === 'documentos' ? (
           <DocumentsView
@@ -1850,6 +2067,20 @@ export default function App() {
           />
         ) : (
           <>
+            {/* Primeiros Passos — só pra quem pode agir (admin/gestor/lider),
+                some sozinho assim que setor + funcionário + documento existem. */}
+            {!isFullScreen && (currentUser.role === 'admin' || currentUser.role === 'gestor' || currentUser.role === 'lider') && (
+              <OnboardingChecklist
+                companyId={companyId || ''}
+                hasSectors={sectors.length > 0}
+                hasEmployees={employees.length > 0}
+                hasDocuments={pops.length + atrs.length + its.length > 0}
+                onGoToSectors={() => setCurrentView('sectors')}
+                onGoToEmployees={() => setCurrentView('employees')}
+                onCreateDocument={() => handleOpenCreateModal('pop')}
+              />
+            )}
+
             {/* Statistics Widgets */}
         {!isFullScreen && (
           <section className="no-print grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 mb-8">
@@ -1897,7 +2128,7 @@ export default function App() {
           >
             <div>
               <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Setores Ativos</span>
-              <h2 className="text-3xl font-black text-amber-600 dark:text-amber-400 font-display mt-1 tracking-tight">8</h2>
+              <h2 className="text-3xl font-black text-amber-600 dark:text-amber-400 font-display mt-1 tracking-tight">{sectors.length}</h2>
               <p className="text-[10px] text-slate-450 dark:text-slate-400/80 mt-1">Organizados por lotes</p>
             </div>
             <div className="p-3 bg-amber-500/10 rounded-xl text-amber-600 dark:text-amber-400 border border-amber-500/25 shadow-[0_0_12px_rgba(245,158,11,0.15)]">
@@ -1954,7 +2185,9 @@ export default function App() {
               <SlidersHorizontal className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500" />
               <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Tipo:</span>
               <div className="flex bg-slate-100 dark:bg-slate-950 p-1 rounded-xl border border-slate-200/50 dark:border-slate-800">
-                {(['Todos', 'POP', 'ATR', 'IT'] as const).map(type => (
+                {(['Todos', 'POP', 'ATR', 'IT'] as const)
+                  .filter(type => type === 'Todos' || isDocTypeEnabled(type.toLowerCase() as 'pop' | 'atr' | 'it'))
+                  .map(type => (
                   <button
                     key={type}
                     onClick={() => setSelectedType(type)}
@@ -1964,7 +2197,7 @@ export default function App() {
                         : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-white'
                     }`}
                   >
-                    {type === 'Todos' ? 'Todos' : type === 'POP' ? 'POPs' : type === 'ATR' ? 'ATRs' : 'ITs'}
+                    {type === 'Todos' ? 'Todos' : `${docTypeLabel(type.toLowerCase() as 'pop' | 'atr' | 'it')}s`}
                   </button>
                 ))}
               </div>
@@ -2131,7 +2364,7 @@ export default function App() {
                       Controle de Documentos e Processos
                     </h2>
                     <p className="text-xs md:text-sm text-slate-500 dark:text-slate-400 mt-2 max-w-xl leading-relaxed">
-                      Gerencie, visualize e exporte os Procedimentos Operacionais Padrão (POPs) e as Atribuições de Responsabilidade (ATRs) de propriedade da ACII.
+                      Gerencie, visualize e exporte os Procedimentos Operacionais Padrão (POPs) e as Atribuições de Responsabilidade (ATRs) da sua empresa.
                     </p>
                   </div>
                   <div className="shrink-0 flex items-center justify-center relative z-10">
@@ -2325,6 +2558,19 @@ export default function App() {
                   </div>
                 </div>
 
+                {/*
+                  Fase 4 (rebranding): os 4 blocos "Destaque" abaixo são
+                  conteúdo promocional da PRÓPRIA ACII — apontam pra IDs
+                  reais de POPs dela (POP-020, POP-028...) que só existem
+                  na base da ACII. Pra qualquer outra empresa, esses
+                  botões levariam a documentos inexistentes (link quebrado
+                  de verdade, não só uma questão visual). Em vez de
+                  apagar um conteúdo que os usuários da ACII já usam,
+                  restrinjo a exibição só a ela — outras empresas
+                  simplesmente não veem esta seção.
+                */}
+                {companyId === DEFAULT_COMPANY_ID && (
+                <>
                 {/* Highlight: Autoridade de Registro (AR) */}
                 <div className="mt-2">
                   <div className="flex items-center justify-between mb-4">
@@ -2492,6 +2738,8 @@ export default function App() {
                     ))}
                   </div>
                 </div>
+                </>
+                )}
               </motion.div>
             ) : (
               <motion.div
@@ -2686,7 +2934,7 @@ export default function App() {
                       
                       {/* Logo and Brand */}
                       <div className="p-4 flex justify-center items-center md:col-span-1 min-h-[90px] bg-slate-50/50 dark:bg-slate-950/20">
-                        <ACIILogo className="w-44 h-auto" />
+                        <AppLogo className="w-44 h-auto" logoUrl={companyBranding.logoUrl} primaryColor={companyBranding.primaryColor} companyName={companyBranding.name} />
                       </div>
 
                       {/* Header Text / Metadata fields */}
@@ -3145,7 +3393,7 @@ export default function App() {
                           <div className="border border-slate-200 dark:border-slate-800 rounded-xl p-4 flex flex-col justify-between h-28 bg-slate-50/20 dark:bg-slate-950/10">
                             <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest">Revisado por</span>
                             <div className="border-t border-slate-200 dark:border-slate-800 pt-2 font-bold text-slate-800 dark:text-slate-200">
-                              Gerência Executiva ACII
+                              Gerência Executiva
                               <span className="text-[9px] block text-slate-400 dark:text-slate-500 font-medium mt-0.5">
                                 Gestão de Processos e Qualidade
                               </span>
@@ -3154,7 +3402,7 @@ export default function App() {
                           <div className="border border-slate-200 dark:border-slate-800 rounded-xl p-4 flex flex-col justify-between h-28 bg-slate-50/20 dark:bg-slate-950/10">
                             <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest">Aprovado por</span>
                             <div className="border-t border-slate-200 dark:border-slate-800 pt-2 font-bold text-slate-800 dark:text-slate-200">
-                              Diretoria Executiva ACII
+                              Diretoria Executiva
                               <span className="text-[9px] block text-slate-400 dark:text-slate-500 font-medium mt-0.5">
                                 Vigência desde: {activeDoc.emissionDate}
                               </span>
@@ -3165,8 +3413,8 @@ export default function App() {
 
                       {/* PDF Print Page footer notes */}
                       <div className="pt-8 border-t border-slate-150 dark:border-slate-800 flex justify-between text-[10px] text-slate-400 font-mono">
-                        <span>ACII - Associação Comercial, Industrial e Serviços de Imperatriz</span>
-                        <span>Aprovado por: Gerência Executiva ACII</span>
+                        <span>{companyBranding.name || 'Documento gerado pelo Normatiza'}</span>
+                        <span>Aprovado por: Gerência Executiva</span>
                       </div>
 
                     </div>
@@ -3210,9 +3458,9 @@ export default function App() {
               <div className="p-4 bg-slate-50 dark:bg-slate-950/40 border-b border-slate-200 dark:border-slate-850 flex justify-between items-center">
                 <div>
                   <h3 className="text-base font-bold text-slate-900 dark:text-white font-display">
-                    {editingId ? `Editar ${formId}` : `Criar Novo Documento: ${formDocType.toUpperCase()}`}
+                    {editingId ? `Editar ${formId}` : `Criar Novo Documento: ${docTypeLabel(formDocType)}`}
                   </h3>
-                  <p className="text-3xs text-slate-400">Preencha os campos abaixo para salvar na base local de documentos da ACII</p>
+                  <p className="text-3xs text-slate-400">Preencha os campos abaixo para salvar na base de documentos da empresa</p>
                 </div>
                 <button
                   onClick={() => setIsModalOpen(false)}
@@ -3230,12 +3478,12 @@ export default function App() {
                   <div className="space-y-2.5">
                     <label className="block text-xs font-extrabold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Tipo de Documento</label>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
-                      {/* POP option card */}
-                      <div 
+                      {/* POP option card — Fase 2: some do seletor se a empresa desativou este tipo */}
+                      {isDocTypeEnabled('pop') && (
+                      <div
                         onClick={() => {
                           setFormDocType('pop');
-                          const nextIdNum = Math.max(...pops.map(p => parseInt(p.id.split('-')[1]) || 0), 0) + 1;
-                          setFormId(`POP-${String(nextIdNum).padStart(3, '0')}`);
+                          setFormId(nextSequentialId('POP', pops));
                         }}
                         className={`p-3.5 rounded-xl border cursor-pointer transition-all flex items-start gap-3.5 ${
                           formDocType === 'pop'
@@ -3247,19 +3495,20 @@ export default function App() {
                           <Layers className="w-5 h-5" />
                         </div>
                         <div>
-                          <h4 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-tight font-display">Procedimento (POP)</h4>
+                          <h4 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-tight font-display">Procedimento ({docTypeLabel('pop')})</h4>
                           <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 leading-normal">
                             Descreve o fluxo operacional, etapas sequenciais de processos e indicadores de desempenho.
                           </p>
                         </div>
                       </div>
-                      
+                      )}
+
                       {/* ATR option card */}
-                      <div 
+                      {isDocTypeEnabled('atr') && (
+                      <div
                         onClick={() => {
                           setFormDocType('atr');
-                          const nextIdNum = Math.max(...atrs.map(a => parseInt(a.id.split('-')[1]) || 0), 0) + 1;
-                          setFormId(`Atr-${String(nextIdNum).padStart(3, '0')}`);
+                          setFormId(nextSequentialId('Atr', atrs));
                         }}
                         className={`p-3.5 rounded-xl border cursor-pointer transition-all flex items-start gap-3.5 ${
                           formDocType === 'atr'
@@ -3271,19 +3520,20 @@ export default function App() {
                           <Briefcase className="w-5 h-5" />
                         </div>
                         <div>
-                          <h4 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-tight font-display">Atribuição (ATR)</h4>
+                          <h4 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-tight font-display">Atribuição ({docTypeLabel('atr')})</h4>
                           <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 leading-normal">
                             Descreve as tarefas de um cargo, liderança direta/indireta, formação e competências técnicas ou atitudinais.
                           </p>
                         </div>
                       </div>
+                      )}
 
                       {/* IT option card */}
-                      <div 
+                      {isDocTypeEnabled('it') && (
+                      <div
                         onClick={() => {
                           setFormDocType('it');
-                          const nextIdNum = Math.max(...its.map(i => parseInt(i.id.split('-')[1]) || 0), 0) + 1;
-                          setFormId(`IT-${String(nextIdNum).padStart(3, '0')}`);
+                          setFormId(nextSequentialId('IT', its));
                         }}
                         className={`p-3.5 rounded-xl border cursor-pointer transition-all flex items-start gap-3.5 ${
                           formDocType === 'it'
@@ -3295,12 +3545,13 @@ export default function App() {
                           <FileText className="w-5 h-5" />
                         </div>
                         <div>
-                          <h4 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-tight font-display">Instrução de Trabalho (IT)</h4>
+                          <h4 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-tight font-display">Instrução de Trabalho ({docTypeLabel('it')})</h4>
                           <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 leading-normal">
                             Instruções simplificadas passo a passo de como fazer uma determinada tarefa de menor complexidade.
                           </p>
                         </div>
                       </div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -3413,7 +3664,7 @@ export default function App() {
                           type="text"
                           value={formIndirectLeader}
                           onChange={e => setFormIndirectLeader(e.target.value)}
-                          placeholder="Ex: Presidente ACII"
+                          placeholder="Ex: Diretor Executivo"
                           className="w-full px-3.5 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg text-sm text-slate-800 dark:text-slate-250 focus:outline-none"
                         />
                       </div>
@@ -3745,12 +3996,17 @@ export default function App() {
         onUpdateUsers={handleUpdateUsers}
         currentUser={currentUser}
         employees={employees}
+        employeesLoading={employeesLoading}
         onUpdateEmployees={setEmployees}
         profilePermissions={profilePermissions}
         onUpdatePermissions={handleUpdatePermissions}
         pops={pops}
         atrs={atrs}
         its={its}
+        documentTypesSettings={documentTypesSettings}
+        onUpdateDocumentTypesSettings={handleUpdateDocumentTypesSettings}
+        companyBranding={companyBranding}
+        onUpdateCompanyBranding={handleUpdateCompanyBranding}
         onSelectDoc={(id, type) => {
           setSelectedDocId(id);
           setSelectedDocType(type);
@@ -3758,6 +4014,11 @@ export default function App() {
           setCurrentView('portal');
           setIsAdminModalOpen(false);
         }}
+      />
+
+      <CompanyOnboardingModal
+        isOpen={isCompanyOnboardingOpen}
+        onClose={() => setIsCompanyOnboardingOpen(false)}
       />
     </div>
   );

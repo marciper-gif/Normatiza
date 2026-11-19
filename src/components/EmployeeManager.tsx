@@ -11,6 +11,7 @@ import { hashPassword, getDefaultInitialPassword } from '../lib/userManagement';
 
 interface EmployeeManagerProps {
   employees: Employee[];
+  employeesLoading?: boolean;
   setEmployees: React.Dispatch<React.SetStateAction<Employee[]>>;
   sectors: SectorData[];
   pops: POP[];
@@ -24,6 +25,7 @@ interface EmployeeManagerProps {
 
 export default function EmployeeManager({
   employees,
+  employeesLoading = false,
   setEmployees,
   sectors,
   pops,
@@ -263,7 +265,7 @@ export default function EmployeeManager({
           {canEditEmployees && (
             <button
               onClick={handleOpenCreate}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black uppercase tracking-wider shadow-sm hover:shadow transition-all flex items-center justify-center gap-2 cursor-pointer shrink-0"
+              className="px-4 py-2 bg-[var(--brand-primary)] hover:brightness-110 text-white rounded-xl text-xs font-black uppercase tracking-wider shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer shrink-0"
               id="btn-add-employee"
             >
               <Plus className="w-4 h-4" />
@@ -323,11 +325,29 @@ export default function EmployeeManager({
       {/* Grid of employees */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
         <AnimatePresence mode="popLayout">
-          {filteredEmployees.length === 0 ? (
+          {employeesLoading && employees.length === 0 ? (
+            // Skeleton — ver nota em useEmployeesState.ts (Fase 5): sem isso,
+            // uma empresa nova via "nenhum funcionário encontrado" por um
+            // instante antes da primeira resposta do Firestore chegar.
+            [0, 1, 2].map(i => (
+              <div key={i} className="h-[230px] rounded-2xl bg-white dark:bg-slate-900 border border-slate-150 dark:border-slate-850 p-5 animate-pulse space-y-3">
+                <div className="h-4 w-2/3 bg-slate-150 dark:bg-slate-800 rounded" />
+                <div className="h-3 w-1/2 bg-slate-150 dark:bg-slate-800 rounded" />
+                <div className="h-3 w-full bg-slate-100 dark:bg-slate-850 rounded mt-6" />
+                <div className="h-3 w-4/5 bg-slate-100 dark:bg-slate-850 rounded" />
+              </div>
+            ))
+          ) : filteredEmployees.length === 0 ? (
             <div className="col-span-full py-16 text-center bg-white dark:bg-slate-900 rounded-2xl border border-slate-150 dark:border-slate-850">
               <User className="w-12 h-12 text-slate-300 dark:text-slate-700 mx-auto" />
-              <p className="text-sm font-semibold text-slate-500 dark:text-slate-400 mt-4">Nenhum funcionário encontrado</p>
-              <p className="text-xs text-slate-400 mt-1">Experimente alterar as palavras-chave ou os filtros ativos.</p>
+              <p className="text-sm font-semibold text-slate-500 dark:text-slate-400 mt-4">
+                {employees.length === 0 ? 'Nenhum funcionário cadastrado ainda' : 'Nenhum funcionário encontrado'}
+              </p>
+              <p className="text-xs text-slate-400 mt-1">
+                {employees.length === 0
+                  ? 'Cadastre o primeiro funcionário para começar.'
+                  : 'Experimente alterar as palavras-chave ou os filtros ativos.'}
+              </p>
             </div>
           ) : (
             filteredEmployees.map(emp => (
@@ -513,7 +533,7 @@ export default function EmployeeManager({
                     <label className="block text-xs font-bold text-slate-500 dark:text-slate-400 uppercase mb-1.5">Matrícula (Opcional)</label>
                     <input
                       type="text"
-                      placeholder="Ex: ACII-2026-45"
+                      placeholder="Ex: 2026-045"
                       value={formRegistration}
                       onChange={e => setFormRegistration(e.target.value)}
                       className="w-full px-3.5 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-850 rounded-lg text-slate-800 dark:text-slate-200 focus:outline-none focus:border-sky-500 transition-colors text-xs"

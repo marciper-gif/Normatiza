@@ -17,3 +17,44 @@ export const linkGoogleUserCallable = httpsCallable(functions, 'linkGoogleUser')
 // Define uma nova senha (troca própria ou reset por admin/gestor) sem
 // nunca gravar texto puro — só o hash.
 export const setPasswordCallable = httpsCallable(functions, 'setPassword');
+
+// Cadastra uma empresa nova (tenant) + sua primeira conta admin — Fase 3
+// (onboarding). Só aceita quando quem chama está logado com o e-mail
+// Google do dono da plataforma (ver RUNTIME_ADMIN_EMAIL em
+// functions/index.js); qualquer outro chamador recebe permission-denied.
+export const createCompanyCallable = httpsCallable(functions, 'createCompany');
+
+// Reseta a senha do admin de qualquer empresa, mesmo sem o dono da
+// plataforma ter uma conta lá — recuperação pra quando a senha inicial de
+// uma empresa (ex.: empresa de teste) se perde e não há mais nenhuma
+// forma de acessá-la. Mesma restrição de acesso de createCompany:
+// permission-denied pra qualquer chamador que não seja RUNTIME_ADMIN_EMAIL.
+export const platformResetPasswordCallable = httpsCallable(functions, 'platformResetPassword');
+
+// Lista id/nome das empresas ativas — só pro dono da plataforma, pra
+// montar a tela neutra (PlatformAdminHome) com um botão "Entrar" por
+// empresa. Mesma restrição de acesso de createCompany.
+export const listCompaniesCallable = httpsCallable(functions, 'listCompanies');
+
+// Troca a sessão do dono da plataforma (que começa sempre na sentinela
+// PLATFORM_COMPANY_ID, ver src/lib/tenant.ts) pra uma empresa existente,
+// atualizando auth_links/{uid} no servidor — sem isso as Firestore Rules
+// continuariam enxergando a sessão como a sentinela.
+export const enterCompanyCallable = httpsCallable(functions, 'enterCompany');
+
+// "Esqueci minha senha" self-service — a conta precisa ter e-mail
+// cadastrado (users/{id}.email, editável em Painel Admin → Usuários).
+// Sem login/sessão nenhuma: é exatamente o cenário de "não consigo
+// entrar". requestPassword manda o e-mail com o link; confirmPassword
+// (chamado pela página /resetar-senha) efetiva a nova senha com o token
+// daquele link.
+export const requestPasswordResetCallable = httpsCallable(functions, 'requestPasswordReset');
+export const confirmPasswordResetCallable = httpsCallable(functions, 'confirmPasswordReset');
+
+// Devolve uma URL assinada (expira em minutos) para baixar um arquivo do
+// módulo de guarda de documentos, após checar empresa/papel/setor no
+// servidor. Substitui o uso direto do fileUrl (token permanente).
+export const getDocumentDownloadUrlCallable = httpsCallable<
+  { documentId: string; version?: number },
+  { url: string }
+>(functions, 'getDocumentDownloadUrl');

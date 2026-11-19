@@ -1,14 +1,16 @@
-import { useState, FormEvent, useMemo } from 'react';
+import { useState, useEffect, FormEvent, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  X, UserPlus, Users, Trash2, Edit2, ShieldAlert, Key, 
+import {
+  X, UserPlus, Users, Trash2, Edit2, ShieldAlert, Key,
   CheckCircle, User, ShieldCheck, Eye, EyeOff, Sliders, Shield, Award, HelpCircle,
   Briefcase, Layers, FileText, Plus, Search, Lock, History, Clock, ArrowUpRight,
-  RotateCcw, Power, Check
+  RotateCcw, Power, Check, Palette, UploadCloud, Loader2
 } from 'lucide-react';
-import { UserAccount, Employee, ProfilePermissions, POP, ATR, IT } from '../types';
+import { UserAccount, Employee, ProfilePermissions, POP, ATR, IT, DocumentTypesSettings } from '../types';
 import { dbSaveUserAccount, dbDeleteUserAccount } from '../lib/firebaseSync';
 import { getDefaultInitialPassword, hashPassword, migrarERemoverSenhasEmTextoPuro } from '../lib/userManagement';
+import { uploadCompanyLogo, validateLogoFile } from '../lib/documentStorage';
+import { getCurrentCompanyId } from '../lib/tenant';
 
 interface DocumentLogEntry {
   docId: string;
@@ -28,6 +30,7 @@ interface AdminUsersModalProps {
   onUpdateUsers: (newUsers: UserAccount[]) => void;
   currentUser: UserAccount;
   employees: Employee[];
+  employeesLoading?: boolean;
   onUpdateEmployees: (newEmployees: Employee[]) => void;
   profilePermissions: ProfilePermissions;
   onUpdatePermissions: (newPerms: ProfilePermissions) => void;
@@ -35,6 +38,10 @@ interface AdminUsersModalProps {
   atrs: ATR[];
   its: IT[];
   onSelectDoc?: (id: string, type: 'pop' | 'atr' | 'it') => void;
+  documentTypesSettings: DocumentTypesSettings;
+  onUpdateDocumentTypesSettings: (settings: DocumentTypesSettings) => void;
+  companyBranding: { name: string; logoUrl: string; primaryColor: string };
+  onUpdateCompanyBranding: (branding: { name: string; logoUrl: string; primaryColor: string }) => void;
 }
 
 export default function AdminUsersModal({ 
@@ -44,15 +51,67 @@ export default function AdminUsersModal({
   onUpdateUsers, 
   currentUser,
   employees,
+  employeesLoading = false,
   onUpdateEmployees,
   profilePermissions,
   onUpdatePermissions,
   pops,
   atrs,
   its,
-  onSelectDoc
+  onSelectDoc,
+  documentTypesSettings,
+  onUpdateDocumentTypesSettings,
+  companyBranding,
+  onUpdateCompanyBranding
 }: AdminUsersModalProps) {
-  const [activeSubTab, setActiveSubTab] = useState<'users' | 'profiles' | 'content_control' | 'logs'>('content_control');
+  const [activeSubTab, setActiveSubTab] = useState<'users' | 'profiles' | 'content_control' | 'document_types' | 'branding' | 'logs'>('content_control');
+  // Rascunho local da identidade visual — commit só ao sair do campo
+  // (onBlur), mesmo raciocínio do nome de exibição na aba "Tipos de
+  // Documento": evita gravar no Firestore a cada tecla digitada.
+  const [brandingDraft, setBrandingDraft] = useState(companyBranding);
+  const [logoUploading, setLogoUploading] = useState(false);
+  const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
+
+  // BUG DE CROSS-TENANT ENCONTRADO EM TESTE (mesma classe já corrigida em
+  // vários outros lugares nesta fase — ver comentário grande no efeito de
+  // App.tsx que assina `companies/{companyId}`): como este modal nunca é
+  // desmontado (fica sempre no DOM, só o `isOpen` muda), o `useState`
+  // acima só captura `companyBranding` uma vez, na primeira montagem. Ao
+  // trocar de empresa no mesmo navegador sem recarregar a página,
+  // `brandingDraft` continuava com nome/logo/cor da empresa ANTERIOR —
+  // e ao salvar QUALQUER campo (ex.: só a cor), o objeto inteiro
+  // (incluindo o nome antigo, errado) era gravado por cima do documento
+  // da empresa nova. Foi exatamente isso que aconteceu: uma empresa nova
+  // apareceu com o nome da ACII depois de mexer só na cor. Corrigido
+  // ressincronizando o rascunho sempre que a prop mudar de verdade.
+  useEffect(() => {
+    setBrandingDraft(companyBranding);
+  }, [companyBranding]);
+
+  // Envio direto de arquivo pro logo (Identidade Visual) — alternativa ao
+  // campo de URL logo abaixo, pra quem não tem/não sabe hospedar uma
+  // imagem em outro lugar. Reaproveita o mesmo upload com retry-por-
+  // claims-atrasados já usado pros documentos de setor (ver comentário
+  // grande em uploadCompanyLogo, src/lib/documentStorage.ts).
+  const handleLogoFileSelect = async (file: File) => {
+    setLogoUploadError(null);
+    const validationError = validateLogoFile(file);
+    if (validationError) {
+      setLogoUploadError(validationError);
+      return;
+    }
+    setLogoUploading(true);
+    try {
+      const logoUrl = await uploadCompanyLogo(file, getCurrentCompanyId());
+      const next = { ...brandingDraft, logoUrl };
+      setBrandingDraft(next);
+      onUpdateCompanyBranding(next);
+    } catch (err: any) {
+      setLogoUploadError(err?.message || 'Falha ao enviar a imagem. Tente novamente.');
+    } finally {
+      setLogoUploading(false);
+    }
+  };
   const [isAddingNew, setIsAddingNew] = useState(false);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   
@@ -146,6 +205,7 @@ export default function AdminUsersModal({
   // Form fields
   const [formName, setFormName] = useState('');
   const [formUsername, setFormUsername] = useState('');
+  const [formEmail, setFormEmail] = useState('');
   const [formPassword, setFormPassword] = useState('');
   const [formRole, setFormRole] = useState<'admin' | 'gestor' | 'colaborador' | 'lider'>('colaborador');
   const [formEmployeeId, setFormEmployeeId] = useState<string>('');
@@ -237,6 +297,7 @@ export default function AdminUsersModal({
     setIsAddingNew(true);
     setFormName(user.name);
     setFormUsername(user.username);
+    setFormEmail(user.email || '');
     // A senha não fica mais guardada em texto puro, então o campo começa
     // vazio: deixar em branco mantém a senha atual, digitar algo a troca.
     setFormPassword('');
@@ -253,6 +314,7 @@ export default function AdminUsersModal({
     setEditingUserId(null);
     setFormName('');
     setFormUsername('');
+    setFormEmail('');
     setFormPassword('');
     setFormRole('colaborador');
     setFormEmployeeId('');
@@ -362,6 +424,7 @@ export default function AdminUsersModal({
             ...u,
             name: formName.trim(),
             username: formUsername.trim(),
+            email: formEmail.trim() || undefined,
             passwordHash: passHash || u.passwordHash,
             role: formRole,
             employeeId: formEmployeeId || undefined,
@@ -386,6 +449,7 @@ export default function AdminUsersModal({
         id: `user-${Date.now()}`,
         name: formName.trim(),
         username: formUsername.trim(),
+        email: formEmail.trim() || undefined,
         passwordHash: passHash,
         role: formRole,
         employeeId: formEmployeeId || undefined,
@@ -581,7 +645,7 @@ export default function AdminUsersModal({
         <div className="p-6 overflow-y-auto flex-1 space-y-6">
           
           {/* Subtabs inside Modal */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 bg-slate-100 dark:bg-slate-950 p-1 rounded-xl border border-slate-200/50 dark:border-slate-800/80 mb-4 gap-1">
+          <div className="grid grid-cols-3 sm:grid-cols-6 bg-slate-100 dark:bg-slate-950 p-1 rounded-xl border border-slate-200/50 dark:border-slate-800/80 mb-4 gap-1">
             <button
               onClick={() => setActiveSubTab('content_control')}
               className={`py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
@@ -614,6 +678,28 @@ export default function AdminUsersModal({
             >
               <Shield className="w-3.5 h-3.5" />
               <span>Perfis Padrão</span>
+            </button>
+            <button
+              onClick={() => setActiveSubTab('document_types')}
+              className={`py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                activeSubTab === 'document_types'
+                  ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-450 font-black shadow-3xs border border-emerald-500/15'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-white'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>Tipos de Documento</span>
+            </button>
+            <button
+              onClick={() => setActiveSubTab('branding')}
+              className={`py-2 text-[10px] sm:text-xs font-black uppercase tracking-wider rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                activeSubTab === 'branding'
+                  ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-450 font-black shadow-3xs border border-emerald-500/15'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-white'
+              }`}
+            >
+              <Palette className="w-3.5 h-3.5" />
+              <span>Identidade Visual</span>
             </button>
             <button
               onClick={() => setActiveSubTab('logs')}
@@ -685,10 +771,28 @@ export default function AdminUsersModal({
                     );
                   });
 
+                  if (employeesLoading && employees.length === 0) {
+                    // Skeleton — ver nota grande em useEmployeesState.ts sobre
+                    // por que funcionários (diferente de ATR/POP/IT/setores)
+                    // precisam desse sinal explícito de carregamento.
+                    return (
+                      <div className="space-y-2 animate-pulse">
+                        {[0, 1, 2].map(i => (
+                          <div key={i} className="h-16 bg-slate-100 dark:bg-slate-850/60 rounded-xl" />
+                        ))}
+                      </div>
+                    );
+                  }
+
                   if (filtered.length === 0) {
                     return (
-                      <div className="text-center py-8 text-slate-400 text-xs italic">
-                        Nenhum colaborador encontrado para a busca "{gridSearchQuery}".
+                      <div className="text-center py-10 text-slate-400">
+                        <Users className="w-8 h-8 mx-auto mb-2.5 opacity-40" />
+                        <p className="text-xs font-medium">
+                          {employees.length === 0
+                            ? 'Nenhum colaborador cadastrado ainda — cadastre um funcionário para criar a primeira conta de acesso.'
+                            : `Nenhum colaborador encontrado para a busca "${gridSearchQuery}".`}
+                        </p>
                       </div>
                     );
                   }
@@ -748,7 +852,7 @@ export default function AdminUsersModal({
                                       <button
                                         type="button"
                                         onClick={() => handleSaveTempPassword(userAcc.id)}
-                                        className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-colors cursor-pointer shadow-xs shrink-0"
+                                        className="px-2 py-1 bg-[var(--brand-primary)] hover:brightness-110 text-white rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-all cursor-pointer shadow-xs shrink-0"
                                       >
                                         Salvar
                                       </button>
@@ -759,7 +863,7 @@ export default function AdminUsersModal({
                                 <button
                                   type="button"
                                   onClick={() => handleCreateAccount(emp)}
-                                  className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-colors flex items-center gap-1 cursor-pointer"
+                                  className="px-2 py-1 bg-[var(--brand-primary)] hover:brightness-110 text-white rounded-lg text-[9px] font-extrabold uppercase tracking-wider transition-all flex items-center gap-1 cursor-pointer"
                                 >
                                   <UserPlus className="w-2.5 h-2.5" />
                                   <span>Criar Conta</span>
@@ -1355,6 +1459,194 @@ export default function AdminUsersModal({
                 </div>
               </div>
             </div>
+          ) : activeSubTab === 'document_types' ? (
+            <div className="space-y-4">
+              <div className="bg-emerald-500/10 border border-emerald-500/20 p-4 rounded-xl text-[11px] leading-relaxed text-slate-750 dark:text-slate-300 flex gap-2.5">
+                <Layers className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600 dark:text-emerald-450" />
+                <span>
+                  Desative um tipo de documento se sua empresa não usa (some do menu e das telas de
+                  criação — os documentos já cadastrados desse tipo não são apagados, só ficam fora
+                  de novos cadastros). O nome de exibição é usado nos filtros e títulos principais das
+                  telas; alguns textos internos dos formulários de cada tipo continuam com o nome
+                  padrão por enquanto.
+                </span>
+              </div>
+
+              {(Object.keys(documentTypesSettings) as Array<keyof DocumentTypesSettings>).map(typeKey => {
+                const config = documentTypesSettings[typeKey];
+                const defaultLabel = { atr: 'ATR', pop: 'POP', it: 'IT', guarded: 'Documentos' }[typeKey];
+                const description = {
+                  atr: 'Análise Técnica de Requisitos — descrição de cargo.',
+                  pop: 'Procedimento Operacional Padrão.',
+                  it: 'Instrução de Trabalho.',
+                  guarded: 'Guarda de documentos digitalizados por setor (contratos, notas fiscais, etc.).'
+                }[typeKey];
+                return (
+                  <div
+                    key={typeKey}
+                    className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center gap-4"
+                  >
+                    <label className="flex items-center gap-3 cursor-pointer shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={config.enabled}
+                        onChange={() => onUpdateDocumentTypesSettings({
+                          ...documentTypesSettings,
+                          [typeKey]: { ...config, enabled: !config.enabled }
+                        })}
+                        className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer w-4 h-4"
+                      />
+                      <div>
+                        <span className="text-xs font-bold text-slate-700 dark:text-slate-300">Habilitado</span>
+                        <p className="text-[10px] text-slate-400">{defaultLabel} — {description}</p>
+                      </div>
+                    </label>
+                    <div className="flex-1 sm:max-w-xs sm:ml-auto">
+                      <label className="block text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase mb-1">
+                        Nome de exibição
+                      </label>
+                      <input
+                        type="text"
+                        defaultValue={config.label}
+                        placeholder={defaultLabel}
+                        disabled={!config.enabled}
+                        onBlur={(e) => {
+                          const newLabel = e.target.value.trim() || defaultLabel;
+                          if (newLabel === config.label) return;
+                          onUpdateDocumentTypesSettings({
+                            ...documentTypesSettings,
+                            [typeKey]: { ...config, label: newLabel }
+                          });
+                        }}
+                        className="w-full px-3 py-1.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-850 rounded-lg text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : activeSubTab === 'branding' ? (
+            <div className="space-y-4">
+              <div className="bg-emerald-500/10 border border-emerald-500/20 p-4 rounded-xl text-[11px] leading-relaxed text-slate-750 dark:text-slate-300 flex gap-2.5">
+                <Palette className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600 dark:text-emerald-450" />
+                <span>
+                  Nome, logo e cor aparecem no cabeçalho do sistema e no topo dos documentos
+                  exportados/impressos. Envie o arquivo do logo direto do computador (ou celular),
+                  ou informe um link de uma imagem já hospedada em outro lugar, se preferir.
+                </span>
+              </div>
+
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 dark:text-slate-400 uppercase mb-1.5">Nome da Empresa</label>
+                  <input
+                    type="text"
+                    defaultValue={brandingDraft.name}
+                    placeholder="Nome de exibição da empresa"
+                    onBlur={(e) => {
+                      const next = { ...brandingDraft, name: e.target.value.trim() };
+                      setBrandingDraft(next);
+                      if (next.name !== companyBranding.name) onUpdateCompanyBranding(next);
+                    }}
+                    className="w-full px-3.5 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-850 rounded-lg text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors text-xs"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 dark:text-slate-400 uppercase mb-1.5">Logo da Empresa (opcional)</label>
+                  {brandingDraft.logoUrl && (
+                    <div className="flex items-center gap-3 mb-2.5 p-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-850 rounded-lg">
+                      <img src={brandingDraft.logoUrl} alt="Logo atual" className="w-10 h-10 rounded-lg object-contain bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800" />
+                      <span className="text-2xs text-slate-450 dark:text-slate-500">Logo atual — envie outro arquivo abaixo pra substituir.</span>
+                    </div>
+                  )}
+                  <label
+                    htmlFor="logo-file-input"
+                    className={`flex items-center justify-center gap-2 w-full px-3.5 py-2.5 border border-dashed rounded-lg text-xs font-bold transition-colors ${
+                      logoUploading
+                        ? 'border-slate-300 dark:border-slate-700 text-slate-400 cursor-wait'
+                        : 'border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:border-emerald-500 hover:text-emerald-600 dark:hover:text-emerald-450 cursor-pointer'
+                    }`}
+                  >
+                    {logoUploading ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        Enviando...
+                      </>
+                    ) : (
+                      <>
+                        <UploadCloud className="w-3.5 h-3.5" />
+                        Enviar arquivo (JPG, PNG ou WEBP, até 3MB)
+                      </>
+                    )}
+                  </label>
+                  <input
+                    id="logo-file-input"
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    disabled={logoUploading}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = ''; // permite reenviar o mesmo arquivo depois, se precisar
+                      if (file) handleLogoFileSelect(file);
+                    }}
+                    className="hidden"
+                  />
+                  {logoUploadError && (
+                    <p className="text-2xs text-rose-500 mt-1.5">{logoUploadError}</p>
+                  )}
+                  <details className="mt-2.5">
+                    <summary className="text-2xs text-slate-400 cursor-pointer hover:text-slate-600 dark:hover:text-slate-300">
+                      Prefere usar um link já hospedado em outro lugar?
+                    </summary>
+                    <input
+                      type="text"
+                      defaultValue={brandingDraft.logoUrl}
+                      placeholder="https://.../logo.png"
+                      onBlur={(e) => {
+                        const next = { ...brandingDraft, logoUrl: e.target.value.trim() };
+                        setBrandingDraft(next);
+                        if (next.logoUrl !== companyBranding.logoUrl) onUpdateCompanyBranding(next);
+                      }}
+                      className="w-full mt-2 px-3.5 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-850 rounded-lg text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors text-xs"
+                    />
+                  </details>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 dark:text-slate-400 uppercase mb-1.5">Cor Principal (opcional)</label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="color"
+                      value={brandingDraft.primaryColor || '#10b981'}
+                      onChange={(e) => {
+                        const next = { ...brandingDraft, primaryColor: e.target.value };
+                        setBrandingDraft(next);
+                        onUpdateCompanyBranding(next);
+                      }}
+                      className="w-10 h-10 rounded-lg border border-slate-200 dark:border-slate-800 cursor-pointer bg-transparent"
+                    />
+                    <input
+                      type="text"
+                      defaultValue={brandingDraft.primaryColor}
+                      placeholder="#10b981"
+                      onBlur={(e) => {
+                        const next = { ...brandingDraft, primaryColor: e.target.value.trim() };
+                        setBrandingDraft(next);
+                        if (next.primaryColor !== companyBranding.primaryColor) onUpdateCompanyBranding(next);
+                      }}
+                      className="flex-1 px-3.5 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-850 rounded-lg text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors text-xs font-mono"
+                    />
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-1.5">
+                    Usada no emblema padrão do logo (quando não há URL de logo própria), no
+                    cabeçalho do sistema e nos principais botões de ação do sistema (Salvar,
+                    Criar, Confirmar). Cores de status (selos "Ativo", campos em foco) continuam
+                    padronizadas de propósito, em qualquer empresa.
+                  </p>
+                </div>
+              </div>
+            </div>
           ) : activeSubTab === 'logs' ? (
             <div className="space-y-5">
               {/* Banner */}
@@ -1362,7 +1654,7 @@ export default function AdminUsersModal({
                 <History className="w-5 h-5 text-amber-600 shrink-0" />
                 <div>
                   <span className="font-extrabold text-amber-700 dark:text-amber-450 block mb-0.5">Logs de Alterações do Sistema:</span>
-                  Histórico cronológico detalhado contendo todas as ações de criação, emissão e revisões efetuadas nos documentos (ATRs, POPs e ITs) da Associação Comercial, Industrial e de Serviços de Imperatriz (ACII).
+                  Histórico cronológico detalhado contendo todas as ações de criação, emissão e revisões efetuadas nos documentos (ATRs, POPs e ITs) da empresa.
                 </div>
               </div>
 
@@ -1584,6 +1876,17 @@ export default function AdminUsersModal({
                     </div>
 
                     <div>
+                      <label className="block text-3xs font-bold text-slate-500 dark:text-slate-400 uppercase mb-1 pl-1">E-mail (opcional — necessário pra "Esqueci minha senha")</label>
+                      <input
+                        type="email"
+                        value={formEmail}
+                        onChange={e => setFormEmail(e.target.value)}
+                        placeholder="Ex: joao.silva@empresa.com"
+                        className="w-full px-3 py-2 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-xs text-slate-800 dark:text-slate-200 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
                       <label className="block text-3xs font-bold text-slate-500 dark:text-slate-400 uppercase mb-1 pl-1">Senha de Entrada</label>
                       <input
                         type="text"
@@ -1633,7 +1936,7 @@ export default function AdminUsersModal({
                       </button>
                       <button
                         type="submit"
-                        className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-[11px] font-extrabold uppercase tracking-wider shadow-sm transition-all cursor-pointer flex items-center gap-1.5"
+                        className="px-4 py-1.5 bg-[var(--brand-primary)] hover:brightness-110 text-white rounded-xl text-[11px] font-extrabold uppercase tracking-wider shadow-sm transition-all cursor-pointer flex items-center gap-1.5"
                       >
                         <CheckCircle className="w-3.5 h-3.5" />
                         <span>{editingUserId ? 'Salvar Alterações' : 'Salvar Perfil de Acesso'}</span>
@@ -1661,7 +1964,7 @@ export default function AdminUsersModal({
                     )}
                     <button
                       onClick={() => setIsAddingNew(true)}
-                      className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 transition-all cursor-pointer"
+                      className="px-3.5 py-1.5 bg-[var(--brand-primary)] hover:brightness-110 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 transition-all cursor-pointer"
                     >
                       <UserPlus className="w-3.5 h-3.5" />
                       <span>+ Conceder Nova Senha</span>

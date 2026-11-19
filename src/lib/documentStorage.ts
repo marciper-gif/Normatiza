@@ -1,6 +1,7 @@
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { doc, collection } from 'firebase/firestore';
 import { storage, db, auth } from './firebase';
+import { getDocumentDownloadUrlCallable } from './functions';
 
 // Restrições de upload (item 2 da especificação) — validadas aqui no
 // cliente antes de enviar; o storage.rules também valida tamanho/tipo
@@ -38,7 +39,8 @@ export function generateGuardedDocumentId(): string {
 function attemptUpload(
   file: File,
   storagePath: string,
-  onProgress?: (pct: number) => void
+  onProgress?: (pct: number) => void,
+  needsDownloadUrl = true
 ): Promise<{ fileUrl: string; storagePath: string }> {
   const storageRef = ref(storage, storagePath);
   const task = uploadBytesResumable(storageRef, file);
@@ -53,6 +55,14 @@ function attemptUpload(
       },
       reject,
       () => {
+        // Documentos guardados NÃO geram getDownloadURL (link com token
+        // permanente que ignora o storage.rules) — o download passa por
+        // openGuardedDocument -> Cloud Function getDocumentDownloadUrl.
+        // Só o logo da empresa (público por desenho) ainda precisa da URL.
+        if (!needsDownloadUrl) {
+          resolve({ fileUrl: '', storagePath });
+          return;
+        }
         getDownloadURL(task.snapshot.ref)
           .then(fileUrl => resolve({ fileUrl, storagePath }))
           .catch(reject);
@@ -64,9 +74,77 @@ function attemptUpload(
 const RETRY_DELAYS_MS = [4000, 8000, 15000, 25000];
 
 /**
- * Envia o arquivo para documentos/{sectorId}/{documentId}/v{version}_{fileName}
- * (caminho definido no item 2 da especificação) e retorna a URL de
- * download + o caminho salvo no Storage.
+ * Envia um arquivo pra `storagePath` com o mesmo retry-por-claims-atrasados
+ * de uploadGuardedDocumentFile abaixo (ver o comentário grande lá pro
+ * porquê) — extraído aqui pra ser reaproveitado por qualquer upload do
+ * app que dependa de custom claims recém-gravados, não só documentos de
+ * setor. Usado por uploadCompanyLogo (Identidade Visual).
+ */
+async function uploadWithRetry(
+  file: File,
+  storagePath: string,
+  onProgress?: (pct: number) => void,
+  onRetry?: (attempt: number, totalAttempts: number) => void,
+  needsDownloadUrl = true
+): Promise<{ fileUrl: string; storagePath: string }> {
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await attemptUpload(file, storagePath, onProgress, needsDownloadUrl);
+    } catch (err: any) {
+      const isPermissionIssue = err?.code === 'storage/unauthorized';
+      const isLastAttempt = attempt === RETRY_DELAYS_MS.length;
+      if (!isPermissionIssue || isLastAttempt) throw err;
+
+      onRetry?.(attempt + 1, RETRY_DELAYS_MS.length + 1);
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
+      try {
+        await auth.currentUser?.getIdToken(true);
+      } catch (refreshErr) {
+        console.warn('Falha ao renovar token antes de repetir o upload:', refreshErr);
+      }
+    }
+  }
+
+  // Inalcançável — o loop acima sempre retorna ou lança antes de sair.
+  throw new Error('Falha ao enviar o arquivo.');
+}
+
+export const MAX_LOGO_SIZE_BYTES = 3 * 1024 * 1024;
+const ACCEPTED_LOGO_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+
+export function validateLogoFile(file: File): string | null {
+  if (file.size > MAX_LOGO_SIZE_BYTES) {
+    return `Imagem muito grande (${(file.size / 1024 / 1024).toFixed(1)}MB). O limite é 3MB.`;
+  }
+  if (!ACCEPTED_LOGO_MIME_TYPES.includes(file.type)) {
+    return 'Formato não aceito. Envie um JPG, PNG ou WEBP.';
+  }
+  return null;
+}
+
+/**
+ * Envia o logo da empresa pra branding/{companyId}/logo-{timestamp}.{ext}
+ * (ver storage.rules) — o timestamp no nome evita que o navegador (ou um
+ * CDN) sirva uma versão em cache antiga depois de trocar o logo, já que a
+ * URL de download muda a cada envio.
+ */
+export async function uploadCompanyLogo(
+  file: File,
+  companyId: string,
+  onProgress?: (pct: number) => void,
+  onRetry?: (attempt: number, totalAttempts: number) => void
+): Promise<string> {
+  const ext = (file.name.split('.').pop() || 'png').toLowerCase();
+  const storagePath = `branding/${companyId}/logo-${Date.now()}.${ext}`;
+  const { fileUrl } = await uploadWithRetry(file, storagePath, onProgress, onRetry);
+  return fileUrl;
+}
+
+/**
+ * Envia o arquivo para documentos/{companyId}/{sectorId}/{documentId}/v{version}_{fileName}
+ * (caminho definido no item 2 da especificação; companyId adicionado na
+ * Fase 1 — multiempresa, ver storage.rules) e retorna a URL de download +
+ * o caminho salvo no Storage.
  *
  * As Storage Rules deste projeto leem papel/setor via Custom Claims do
  * Firebase Auth (request.auth.token.role/.sectorId), sincronizados por
@@ -84,32 +162,44 @@ const RETRY_DELAYS_MS = [4000, 8000, 15000, 25000];
  */
 export async function uploadGuardedDocumentFile(
   file: File,
+  companyId: string,
   sectorId: string,
   documentId: string,
   version: number,
   onProgress?: (pct: number) => void,
   onRetry?: (attempt: number, totalAttempts: number) => void
 ): Promise<{ fileUrl: string; storagePath: string }> {
-  const storagePath = `documentos/${sectorId}/${documentId}/v${version}_${file.name}`;
+  const storagePath = `documentos/${companyId}/${sectorId}/${documentId}/v${version}_${file.name}`;
+  return uploadWithRetry(file, storagePath, onProgress, onRetry, false);
+}
 
-  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
-    try {
-      return await attemptUpload(file, storagePath, onProgress);
-    } catch (err: any) {
-      const isPermissionIssue = err?.code === 'storage/unauthorized';
-      const isLastAttempt = attempt === RETRY_DELAYS_MS.length;
-      if (!isPermissionIssue || isLastAttempt) throw err;
+// Tipos que o navegador consegue MOSTRAR numa aba. Os demais (Word, Excel)
+// o navegador só consegue baixar.
+const VIEWABLE_IN_BROWSER = /\.(pdf|png|jpe?g)$/i;
 
-      onRetry?.(attempt + 1, RETRY_DELAYS_MS.length + 1);
-      await new Promise(resolve => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
-      try {
-        await auth.currentUser?.getIdToken(true);
-      } catch (refreshErr) {
-        console.warn('Falha ao renovar token antes de repetir o upload:', refreshErr);
-      }
+/**
+ * Abre (PDF/imagem) ou baixa (Word/Excel) um arquivo do módulo de guarda
+ * via URL assinada de curta duração, emitida pelo servidor só depois de
+ * conferir empresa/papel/setor.
+ *
+ * - PDF/imagem: a aba é aberta de forma síncrona (no clique) e só depois
+ *   recebe a URL, para o bloqueador de pop-ups do navegador não impedir.
+ * - Word/Excel: NÃO abre aba nova — antes, a aba ficava em branco porque o
+ *   navegador transformava a navegação em download. O download é disparado
+ *   na própria página, que continua onde estava.
+ */
+export async function openGuardedDocument(documentId: string, version?: number, fileName?: string): Promise<void> {
+  const viewable = !fileName || VIEWABLE_IN_BROWSER.test(fileName);
+  const tab = viewable ? window.open('', '_blank') : null;
+  try {
+    const { data } = await getDocumentDownloadUrlCallable({ documentId, version });
+    if (tab) {
+      tab.location.href = data.url;
+    } else {
+      window.location.assign(data.url);
     }
+  } catch (err) {
+    tab?.close();
+    throw err;
   }
-
-  // Inalcançável — o loop acima sempre retorna ou lança antes de sair.
-  throw new Error('Falha ao enviar o documento.');
 }

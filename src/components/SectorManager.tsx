@@ -13,6 +13,7 @@ interface SectorManagerProps {
   employees: Employee[];
   pops: POP[];
   atrs: ATR[];
+  companyId?: string | null;
   canEditSectors?: boolean;
 }
 
@@ -34,6 +35,7 @@ export default function SectorManager({
   employees,
   pops,
   atrs,
+  companyId = null,
   canEditSectors = true
 }: SectorManagerProps) {
   // Modal states
@@ -84,7 +86,7 @@ export default function SectorManager({
     }
 
     if (window.confirm(`Tem certeza que deseja remover o setor "${sec.name}"?`)) {
-      dbDeleteSector(sec.id);
+      dbDeleteSector(sec.id, sec.companyId ?? companyId);
       setSectors(prev => prev.filter(s => s.id !== sec.id));
     }
   };
@@ -118,7 +120,10 @@ export default function SectorManager({
       };
       setSectors(prev => prev.map(s => s.id === editingSector.id ? updated : s));
     } else {
-      // Create
+      // Create — código sempre limpo, sem sufixo: o endereço real no
+      // Firestore (que evita colisão entre empresas) é resolvido à parte
+      // por tenantDocPath (ver dbSaveSector em firebaseSync.ts), nunca
+      // aparece aqui.
       const newSec: SectorData = {
         id: `SEC-${Math.floor(100 + Math.random() * 900)}`,
         name: formName.trim(),

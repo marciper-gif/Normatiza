@@ -1,7 +1,64 @@
 export type Sector = string;
 
+// ─────────────────────────────────────────────────────────────────────
+// Multiempresa (Fase 1 da transformação em SaaS)
+// ─────────────────────────────────────────────────────────────────────
+// `companyId` identifica a empresa (tenant) dona de cada registro — ver
+// src/lib/tenant.ts (contexto da empresa da sessão atual) e
+// firestore.rules (isolamento entre empresas). A ACII é o primeiro
+// tenant, com companyId === DEFAULT_COMPANY_ID (ver tenant.ts).
+//
+// Opcional nos tipos abaixo (exceto GuardedDocument, onde é sempre
+// preenchido explicitamente na criação) de propósito: os dados de exemplo
+// (src/data/*.ts) e os objetos montados a partir de formulários em
+// App.tsx/EmployeeManager.tsx/SectorManager.tsx não sabem a própria
+// empresa — quem grava sempre sabe (src/lib/firebaseSync.ts, função
+// withCompanyId, carimba a empresa da sessão atual antes de qualquer
+// escrita real no Firestore). Ausente aqui NUNCA significa "sem
+// isolamento" — as Firestore Rules exigem o campo de verdade no banco.
+export type CompanyId = string;
+
+export interface Company {
+  id: CompanyId;
+  name: string;
+  logoUrl?: string;
+  primaryColor?: string;
+  status?: 'ativo' | 'inativo';
+  createdAt?: string; // ISO
+  documentTypes?: DocumentTypesSettings; // Fase 2 — ver comentário em DocumentTypesSettings
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Fase 2 — tipos de documento configuráveis por empresa
+// ─────────────────────────────────────────────────────────────────────
+// ATR/POP/IT/Digitalizado continuam sendo o padrão do produto (cada um
+// com sua própria coleção/estrutura de dados — não muda nesta fase), mas
+// cada empresa pode desativar o que não usa e trocar o nome de exibição,
+// sem tocar na estrutura de permissões (ProfilePermissionItem continua
+// igual: as permissões são por AÇÃO — ver/editar documento —, não por
+// tipo de documento).
+export interface DocumentTypeConfig {
+  enabled: boolean;
+  label: string; // nome de exibição (ex.: "IT" pode virar "Procedimento" pra outra empresa)
+}
+
+export interface DocumentTypesSettings {
+  atr: DocumentTypeConfig;
+  pop: DocumentTypeConfig;
+  it: DocumentTypeConfig;
+  guarded: DocumentTypeConfig; // módulo de Guarda de Documentos ("Digitalizado")
+}
+
+export const DEFAULT_DOCUMENT_TYPES_SETTINGS: DocumentTypesSettings = {
+  atr: { enabled: true, label: 'ATR' },
+  pop: { enabled: true, label: 'POP' },
+  it: { enabled: true, label: 'IT' },
+  guarded: { enabled: true, label: 'Documentos' }
+};
+
 export interface SectorData {
   id: string;
+  companyId?: CompanyId;
   name: string;
   description?: string;
   color?: string;
@@ -9,6 +66,7 @@ export interface SectorData {
 
 export interface Employee {
   id: string;
+  companyId?: CompanyId;
   name: string;
   email: string;
   phone: string;
@@ -33,6 +91,7 @@ export interface RevisionHistoryEntry {
 
 export interface ATR {
   id: string; // e.g. "Atr-001"
+  companyId?: CompanyId;
   title: string; // e.g. "Gerente Executiva"
   sector: Sector;
   directLeader: string;
@@ -61,6 +120,7 @@ export interface POPStep {
 
 export interface POP {
   id: string; // e.g. "POP-001"
+  companyId?: CompanyId;
   title: string; // e.g. "Participação em Eventos e Reuniões de Patrocínio"
   process: string; // e.g. "ADMINISTRATIVO"
   sector: Sector;
@@ -81,6 +141,7 @@ export interface POP {
 
 export interface IT {
   id: string; // e.g. "IT-001"
+  companyId?: CompanyId;
   title: string;
   sector: Sector;
   objective: string;
@@ -94,8 +155,10 @@ export interface IT {
 
 export interface UserAccount {
   id: string;
+  companyId?: CompanyId; // opcional só pra não quebrar contas antigas ainda não migradas (ver migrate-add-company-id.js) — tratado como DEFAULT_COMPANY_ID onde lido
   username: string;
   name: string;
+  email?: string; // opcional — só existe pra quem cadastrou; necessário pra "Esqueci minha senha" self-service (ver requestPasswordReset, functions/index.js)
   password?: string;
   passwordHash?: string;
   role: 'admin' | 'gestor' | 'colaborador' | 'lider';
@@ -150,6 +213,7 @@ export interface DocumentVersion {
 
 export interface GuardedDocument {
   id: string;
+  companyId: CompanyId;
   title: string;
   titleLower?: string;     // title em minúsculas, sem acento simples — usado só para busca
                             // por prefixo no Firestore (where >= / <), que é case-sensitive.

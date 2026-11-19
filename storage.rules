@@ -13,11 +13,12 @@ service firebase.storage {
     // admin de verdade — bug reproduzido e diagnosticado em produção.
     //
     // Solução: uma Cloud Function (functions/index.js,
-    // syncAuthLinkClaims) espelha auth_links/{uid} (role, sectorId) em
-    // Custom Claims do Firebase Auth sempre que esse documento muda.
-    // Custom claims vêm DENTRO do token (request.auth.token), então o
-    // Storage lê sem nenhuma consulta cross-service — problema resolvido
-    // na raiz, não contornado.
+    // syncAuthLinkClaims) espelha auth_links/{uid} (role, sectorId,
+    // companyId — este último desde a Fase 1/multiempresa) em Custom
+    // Claims do Firebase Auth sempre que esse documento muda. Custom
+    // claims vêm DENTRO do token (request.auth.token), então o Storage
+    // lê sem nenhuma consulta cross-service — problema resolvido na
+    // raiz, não contornado.
     // ─────────────────────────────────────────────────────────────────
 
     function isAuthenticated() {
@@ -32,12 +33,30 @@ service firebase.storage {
       return isAuthenticated() ? request.auth.token.sectorId : null;
     }
 
+    // Multiempresa (Fase 1). Igual ao Firestore: o companyId da sessão vem
+    // SÓ do custom claim (espelhado de auth_links pela Cloud Function
+    // syncAuthLinkClaims no servidor) — nunca de algo que o próprio
+    // request possa influenciar.
+    function currentCompanyId() {
+      return isAuthenticated() ? request.auth.token.companyId : null;
+    }
+
     function isAdmin() {
       return currentRole() == 'admin';
     }
 
     function isGestor() {
       return currentRole() == 'gestor' || currentRole() == 'lider';
+    }
+
+    // canUploadDocuments (permissão configurável por empresa, por
+    // perfil) — espelhada pra cá pela mesma Cloud Function
+    // (syncAuthLinkClaims/syncPermissionsToClaims, functions/index.js)
+    // pelo mesmo motivo de role/sectorId/companyId: o Storage não
+    // consegue consultar o Firestore direto. Só é relevante pra
+    // colaborador — admin/gestor já têm acesso incondicional abaixo.
+    function canUploadClaim() {
+      return isAuthenticated() && request.auth.token.canUpload == true;
     }
 
     // Validação server-side das restrições de upload do item 2 da
@@ -56,28 +75,31 @@ service firebase.storage {
         );
     }
 
-    // documentos/{sectorId}/{documentId}/v{version}_{fileName}
-    match /documentos/{sectorId}/{documentId}/{fileName} {
-      // NOTA: o campo extraViewerSectorIds (setores extras com permissão
-      // de visualização de um documento específico, item 5/6 da
-      // especificação) NÃO é checado aqui — ele vive em
-      // guarded_documents/{documentId} no Firestore, e checá-lo exigiria
-      // de novo uma consulta cross-service (mesma limitação do banco
-      // nomeado acima). Continua funcionando normalmente na TELA (o
-      // Firestore libera a leitura da metadata pros setores extras
-      // normalmente), mas o arquivo em si no Storage só é liberado pro
-      // setor dono do documento ou admin. TODO: se isso virar bloqueio
-      // real no uso, resolver com uma Cloud Function callable que gera
-      // uma URL assinada de download após checar o Firestore no servidor
-      // (sem as limitações do storage.rules).
-      allow read: if isAuthenticated() && (isAdmin() || currentSectorId() == sectorId);
+    // documentos/{companyId}/{sectorId}/{documentId}/v{version}_{fileName}
+    // (companyId adicionado na Fase 1 — multiempresa; era só
+    // documentos/{sectorId}/... antes. Ver src/lib/documentStorage.ts.)
+    match /documentos/{companyId}/{sectorId}/{documentId}/{fileName} {
+      // LEITURA FECHADA PARA O CLIENTE. Todo download passa pela Cloud
+      // Function getDocumentDownloadUrl (functions/index.js), que confere
+      // no Firestore, no servidor, se o usuário é da MESMA empresa e é
+      // admin, do setor dono ou de um setor em extraViewerSectorIds, e
+      // devolve uma URL assinada de 5 minutos. Isso resolve a limitação
+      // antiga (storage.rules não consegue consultar o Firestore nomeado)
+      // e elimina o link com token permanente (getDownloadURL) que
+      // ignorava estas regras — inclusive o isolamento entre empresas.
+      allow read: if false;
 
-      // Upload/nova versão: admin ou gestor do próprio setor da pasta.
-      // TODO (etapa 9 da especificação): incluir aqui também quem tiver
-      // canUploadDocuments == true no perfil — precisa entrar nos custom
-      // claims também (hoje só role/sectorId são espelhados).
-      allow create, update: if isAuthenticated() &&
-        (isAdmin() || (isGestor() && currentSectorId() == sectorId)) &&
+      // Upload/nova versão: admin ou gestor do próprio setor da pasta,
+      // dentro da MESMA empresa do caminho — sem isSameCompany aqui, um
+      // gestor da empresa A poderia enviar um arquivo pra dentro da pasta
+      // da empresa B só sabendo o companyId dela (os IDs de empresa não
+      // são segredo — aparecem em URLs, por exemplo). Colaborador do
+      // próprio setor também pode, SE a empresa tiver liberado
+      // canUploadDocuments pro perfil dele (canUploadClaim acima) — antes
+      // a tela já mostrava o botão de upload pra esse colaborador, mas o
+      // envio sempre falhava aqui (a regra só olhava o papel).
+      allow create, update: if isAuthenticated() && companyId == currentCompanyId() &&
+        (isAdmin() || ((isGestor() || canUploadClaim()) && currentSectorId() == sectorId)) &&
         isValidDocumentUpload();
 
       // Exclusão física do arquivo: ninguém, por enquanto. "Marcar para
@@ -85,6 +107,27 @@ service firebase.storage {
       // Firestore — a exclusão física sempre foi manual/separada. Sem
       // cross-service pra confirmar admin com segurança aqui, é mais
       // seguro fechar por completo até existir uma necessidade real.
+      allow delete: if false;
+    }
+
+    // Identidade visual da empresa (Fase 4/5 — logo enviado por upload
+    // direto, em vez de só aceitar uma URL já hospedada em outro lugar).
+    // Caminho: branding/{companyId}/{fileName}. Só o admin da PRÓPRIA
+    // empresa pode enviar/substituir; qualquer usuário autenticado da
+    // mesma empresa pode ler (o app, na prática, busca pela URL de
+    // download já com token — que funciona independente desta regra de
+    // leitura, mesmo motivo explicado na nota grande do bloco de
+    // documentos acima — mas a regra correta fica registrada aqui mesmo
+    // assim, sem depender só do bypass do token).
+    function isValidLogoUpload() {
+      return request.resource.size <= 3 * 1024 * 1024 &&
+        request.resource.contentType.matches('image/jpeg|image/png|image/webp');
+    }
+
+    match /branding/{companyId}/{fileName} {
+      allow read: if isAuthenticated() && companyId == currentCompanyId();
+      allow create, update: if isAuthenticated() && companyId == currentCompanyId() &&
+        isAdmin() && isValidLogoUpload();
       allow delete: if false;
     }
 

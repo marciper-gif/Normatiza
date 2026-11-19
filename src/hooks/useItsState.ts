@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, SetStateAction } from 'react';
-import { onSnapshot, collection } from 'firebase/firestore';
+import { onSnapshot, collection, query, where } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { dbSaveIT } from '../lib/firebaseSync';
 import { IT } from '../types';
@@ -9,20 +9,20 @@ import { initialITs } from '../data/its';
  * Estado das ITs (predefinidas + criadas no sistema), com persistência em
  * localStorage e sincronização em tempo real com o Firestore. Extraído de
  * App.tsx — mesmo comportamento de antes, só que isolado num hook próprio.
+ * `companyId` (Fase 1 — multiempresa): ver comentário em useSectorsState.ts.
+ *
+ * FASE 1 (bug encontrado depois de publicado) — mesma correção de
+ * useAtrsState.ts: `initialITs` não entra mais no merge quando o
+ * Firestore responde (senão toda empresa via o catálogo de ITs da ACII
+ * junto com o próprio, duplicado). Ver comentário completo lá.
  */
-export function useItsState(authReady: boolean) {
+export function useItsState(authReady: boolean, companyId: string | null) {
   const [its, rawSetITs] = useState<IT[]>(() => {
     const saved = localStorage.getItem('ms-its');
     if (!saved) return initialITs;
     try {
       const parsed = JSON.parse(saved);
-      if (!Array.isArray(parsed) || parsed.length === 0) return initialITs;
-      const initialMap = new Map<string, IT>();
-      initialITs.forEach(i => initialMap.set(i.id, i));
-      parsed.forEach((i: IT) => {
-        if (i && i.id) initialMap.set(i.id, i);
-      });
-      return Array.from(initialMap.values());
+      return Array.isArray(parsed) && parsed.length > 0 ? parsed : initialITs;
     } catch (e) {
       return initialITs;
     }
@@ -46,25 +46,23 @@ export function useItsState(authReady: boolean) {
   }, [its]);
 
   useEffect(() => {
-    if (!db || !authReady) return;
+    if (!db || !authReady || !companyId) return;
 
-    const unsubITs = onSnapshot(collection(db, 'its'), (snapshot) => {
+    const unsubITs = onSnapshot(query(collection(db, 'its'), where('companyId', '==', companyId)), (snapshot) => {
       const list: IT[] = [];
       snapshot.forEach((doc) => {
         list.push(doc.data() as IT);
       });
-      const map = new Map<string, IT>();
-      initialITs.forEach(i => map.set(i.id, i));
-      list.forEach(i => { if (i && i.id) map.set(i.id, i); });
-      const merged = Array.from(map.values());
-      rawSetITs(merged);
-      localStorage.setItem('ms-its', JSON.stringify(merged));
+      // O Firestore é a fonte de verdade a partir daqui — sem mesclar com
+      // initialITs (ver comentário na declaração do hook, acima).
+      rawSetITs(list);
+      localStorage.setItem('ms-its', JSON.stringify(list));
     }, (err) => {
       console.warn("Firestore snapshot error (its):", err);
     });
 
     return () => unsubITs();
-  }, [authReady]);
+  }, [authReady, companyId]);
 
   return [its, setITs] as const;
 }

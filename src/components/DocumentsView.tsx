@@ -25,7 +25,7 @@ import {
   DOCUMENT_STATUS_DOT,
   DOCUMENT_STATUS_LABEL
 } from '../utils/guardedDocuments';
-import { uploadGuardedDocumentFile, validateDocumentFile } from '../lib/documentStorage';
+import { uploadGuardedDocumentFile, validateDocumentFile, openGuardedDocument } from '../lib/documentStorage';
 import { dbSaveGuardedDocument } from '../lib/firebaseSync';
 import {
   GUARDED_DOCS_PAGE_SIZE,
@@ -37,6 +37,7 @@ import {
 } from '../lib/guardedDocumentsQuery';
 import UploadDocumentModal from './UploadDocumentModal';
 import ExpiringDocumentsPanel from './ExpiringDocumentsPanel';
+import { DEFAULT_COMPANY_ID } from '../lib/tenant';
 
 interface DocumentsViewProps {
   sectors: SectorData[];
@@ -66,6 +67,9 @@ export default function DocumentsView({
   currentUserEmployee,
   userPermissions
 }: DocumentsViewProps) {
+  // Fase 1 (multiempresa): toda consulta/upload de documento guardado é
+  // escopada por companyId — ver src/lib/tenant.ts.
+  const companyId = currentUser?.companyId || DEFAULT_COMPANY_ID;
   const [selectedSectorId, setSelectedSectorId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [historyDoc, setHistoryDoc] = useState<GuardedDocument | null>(null);
@@ -82,7 +86,7 @@ export default function DocumentsView({
   useEffect(() => {
     let cancelled = false;
     sectors.forEach(sector => {
-      getSectorDocumentCount(sector.id)
+      getSectorDocumentCount(companyId, sector.id)
         .then(count => {
           if (!cancelled) setSectorCounts(prev => ({ ...prev, [sector.id]: count }));
         })
@@ -93,7 +97,7 @@ export default function DocumentsView({
     return () => {
       cancelled = true;
     };
-  }, [sectors]);
+  }, [sectors, companyId]);
 
   // ── Pasta aberta: lista paginada, em tempo real ────────────────────
   const [openDocs, setOpenDocs] = useState<GuardedDocument[]>([]);
@@ -111,6 +115,7 @@ export default function DocumentsView({
     }
     setOpenLoading(true);
     const unsubscribe = subscribeToSectorDocuments(
+      companyId,
       selectedSectorId,
       openPageLimit,
       docs => {
@@ -123,7 +128,7 @@ export default function DocumentsView({
       }
     );
     return () => unsubscribe();
-  }, [selectedSectorId, openPageLimit]);
+  }, [selectedSectorId, openPageLimit, companyId]);
 
   // Só mostra "Carregar mais" se a última página veio cheia — sinal de
   // que provavelmente existe mais além do limite atual.
@@ -165,6 +170,7 @@ export default function DocumentsView({
     };
     const unsubscribes = sectors.map(sector =>
       subscribeToSectorDocumentsByTitlePrefix(
+        companyId,
         sector.id,
         normalizedQuery,
         SEARCH_RESULTS_PER_SECTOR,
@@ -182,7 +188,7 @@ export default function DocumentsView({
       )
     );
     return () => unsubscribes.forEach(unsub => unsub());
-  }, [normalizedQuery, sectors]);
+  }, [normalizedQuery, sectors, companyId]);
 
   // Reenvio de nova versão (item 4.5 da especificação)
   const versionInputRef = useRef<HTMLInputElement>(null);
@@ -227,6 +233,7 @@ export default function DocumentsView({
       const newVersionNumber = doc.version + 1;
       const { fileUrl, storagePath } = await uploadGuardedDocumentFile(
         file,
+        doc.companyId || companyId,
         doc.sectorId,
         doc.id,
         newVersionNumber,
@@ -279,7 +286,15 @@ export default function DocumentsView({
     }
   };
 
+  const handleOpenFile = (docId: string, version?: number, fileName?: string) => {
+    openGuardedDocument(docId, version, fileName).catch(err => {
+      console.error('Erro ao abrir documento:', err);
+      alert(err?.message || 'Não foi possível abrir o documento.');
+    });
+  };
+
   const handleDownloadClick = (doc: GuardedDocument) => {
+    handleOpenFile(doc.id, undefined, doc.fileName);
     const nowIso = new Date().toISOString();
     const updated: GuardedDocument = {
       ...doc,
@@ -335,16 +350,14 @@ export default function DocumentsView({
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0 self-start sm:self-center">
-          <a
-            href={doc.fileUrl}
-            target="_blank"
-            rel="noopener noreferrer"
+          <button
+            type="button"
             title="Visualizar / baixar"
             onClick={() => handleDownloadClick(doc)}
             className="p-2 rounded-lg text-slate-500 hover:text-sky-600 hover:bg-sky-500/10 dark:text-slate-400 dark:hover:text-sky-400 transition-colors cursor-pointer"
           >
             <Download className="w-4 h-4" />
-          </a>
+          </button>
           <button
             type="button"
             title="Histórico de versões"
@@ -575,9 +588,9 @@ export default function DocumentsView({
                         <span className="text-slate-400 mx-1.5">•</span>
                         <span className="text-slate-500 dark:text-slate-400">{formatDate(v.uploadedAt)}</span>
                       </div>
-                      <a href={v.fileUrl} target="_blank" rel="noopener noreferrer" className="text-sky-600 dark:text-sky-400 hover:underline shrink-0 ml-2">
+                      <button type="button" onClick={() => handleOpenFile(historyDoc.id, v.version, v.fileName)} className="text-sky-600 dark:text-sky-400 hover:underline shrink-0 ml-2">
                         Baixar
-                      </a>
+                      </button>
                     </div>
                   ))}
                 </div>
