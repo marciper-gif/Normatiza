@@ -7,7 +7,7 @@
 // `firebase login`).
 //
 // Como rodar (Cloud Shell):
-//   cd ~/Controle-de-documentos-ACII/functions
+//   cd ~/Normatiza/functions
 //   node set-admin-password.js "SuaNovaSenhaAqui"
 //
 // A senha NUNCA fica salva neste arquivo nem em nenhum commit — ela só
@@ -24,15 +24,23 @@ const crypto = require('crypto');
 const PROJECT_ID = 'dogwood-loader-bln7n';
 const FIRESTORE_DATABASE_ID = 'ai-studio-aciicontroledodo-8a9badc3-1faa-4b52-9783-49cb0814c900';
 
-function sha256Hex(input) {
-  return crypto.createHash('sha256').update(String(input), 'utf8').digest('hex');
+// Mesmo formato do login (functions/index.js, hashPasswordSecure):
+// scrypt com sal aleatório, "scrypt$<sal>$<hash>".
+function hashPasswordSecure(password) {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(String(password), salt, 32, { N: 16384, r: 8, p: 1 });
+  return `scrypt$${salt.toString('hex')}$${hash.toString('hex')}`;
 }
 
 async function main() {
   const novaSenha = process.argv[2];
 
-  if (!novaSenha || novaSenha.trim().length < 4) {
-    console.error('Uso: node set-admin-password.js "SuaNovaSenhaAqui" (mínimo 4 caracteres)');
+  if (!novaSenha || novaSenha.trim().length < 10) {
+    console.error('Uso: node set-admin-password.js "SuaNovaSenhaAqui" (mínimo 10 caracteres)');
+    process.exit(1);
+  }
+  if (['admin', '123', 'colaborador123'].includes(novaSenha.trim().toLowerCase())) {
+    console.error('Essa senha é conhecida demais. Escolha outra.');
     process.exit(1);
   }
 
@@ -62,7 +70,7 @@ async function main() {
     process.exit(1);
   }
 
-  const passwordHash = sha256Hex(novaSenha);
+  const passwordHash = hashPasswordSecure(novaSenha);
 
   await targetDoc.ref.update({
     passwordHash,
