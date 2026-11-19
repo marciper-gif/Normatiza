@@ -94,6 +94,40 @@ function sha256Hex(input) {
   return crypto.createHash('sha256').update(String(input), 'utf8').digest('hex');
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Hash de senha: scrypt com sal aleatório (formato "scrypt$<sal>$<hash>").
+// O SHA-256 puro acima (sem sal) é rápido demais: quem conseguisse ler os
+// hashes (admins/gestores leem a coleção `users`) quebraria senhas curtas
+// em segundos. Contas antigas (SHA-256) continuam entrando normalmente e
+// são convertidas para scrypt no próprio login bem-sucedido.
+// ─────────────────────────────────────────────────────────────────────
+const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1 };
+const SCRYPT_KEYLEN = 32;
+
+function hashPasswordSecure(password) {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(String(password), salt, SCRYPT_KEYLEN, SCRYPT_PARAMS);
+  return `scrypt$${salt.toString('hex')}$${hash.toString('hex')}`;
+}
+
+function isSecureHash(storedHash) {
+  return typeof storedHash === 'string' && storedHash.startsWith('scrypt$');
+}
+
+function verifyPassword(password, storedHash) {
+  if (!storedHash) return false;
+  if (isSecureHash(storedHash)) {
+    const [, saltHex, hashHex] = storedHash.split('$');
+    if (!saltHex || !hashHex) return false;
+    const expected = Buffer.from(hashHex, 'hex');
+    const actual = crypto.scryptSync(String(password), Buffer.from(saltHex, 'hex'), expected.length, SCRYPT_PARAMS);
+    return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+  }
+  // Legado (SHA-256 sem sal), inclusive a variante em minúsculas que
+  // versões antigas do cliente aceitavam.
+  return sha256Hex(password) === storedHash || sha256Hex(String(password).toLowerCase()) === storedHash;
+}
+
 /**
  * Resolve o SectorData.id de um usuário a partir do Employee vinculado —
  * mesma lógica de resolveUserSectorId em src/lib/authLink.ts, mas rodando
@@ -362,10 +396,15 @@ exports.login = onCall({ region: REGION }, async (request) => {
     const plainLegacyPassword = userData.password ? String(userData.password) : null;
     let senhaValida = false;
 
-    if (storedHash) {
-      const candidateHashes = [sha256Hex(password), sha256Hex(password.toLowerCase())];
-      if (candidateHashes.includes(storedHash)) {
-        senhaValida = true;
+    if (storedHash && verifyPassword(password, storedHash)) {
+      senhaValida = true;
+      if (!isSecureHash(storedHash)) {
+        // Converte o hash antigo (SHA-256) para scrypt, agora que temos a
+        // senha correta em mãos. Não bloqueia o login se falhar.
+        userDoc.ref.update({
+          passwordHash: hashPasswordSecure(password),
+          updatedAt: FieldValue.serverTimestamp()
+        }).catch(e => logger.warn('Falha ao converter hash de senha para scrypt:', e));
       }
     }
 
@@ -374,7 +413,7 @@ exports.login = onCall({ region: REGION }, async (request) => {
       if (plainLegacyPassword === password || plainLegacyPassword.toLowerCase() === password.toLowerCase()) {
         senhaValida = true;
         // Migra automaticamente a senha para hash no banco e remove o texto puro
-        const newHash = sha256Hex(password);
+        const newHash = hashPasswordSecure(password);
         userDoc.ref.update({
           passwordHash: newHash,
           password: FieldValue.delete(),
@@ -620,7 +659,7 @@ exports.setPassword = onCall({ region: REGION }, async (request) => {
       throw new HttpsError('permission-denied', 'Sem permissão para alterar a senha deste usuário.');
     }
 
-    const passwordHash = sha256Hex(newPassword);
+    const passwordHash = hashPasswordSecure(newPassword);
     const nowFormatted = new Date().toLocaleString('pt-BR', {
       day: '2-digit',
       month: '2-digit',
@@ -726,7 +765,7 @@ exports.createCompany = onCall({ region: REGION }, async (request) => {
       createdAt: now.toISOString()
     });
 
-    const passwordHash = sha256Hex(adminPassword);
+    const passwordHash = hashPasswordSecure(adminPassword);
     const newUserRef = firestore.collection('users').doc();
     await newUserRef.set({
       id: newUserRef.id,
@@ -924,7 +963,7 @@ exports.platformResetPassword = onCall({ region: REGION }, async (request) => {
       );
     }
 
-    const passwordHash = sha256Hex(newPassword);
+    const passwordHash = hashPasswordSecure(newPassword);
     const nowFormatted = new Date().toLocaleString('pt-BR', {
       day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
     });
@@ -1110,7 +1149,7 @@ exports.confirmPasswordReset = onCall({ region: REGION }, async (request) => {
       throw new HttpsError('not-found', 'Conta não encontrada.');
     }
 
-    const passwordHash = sha256Hex(newPassword);
+    const passwordHash = hashPasswordSecure(newPassword);
     const nowFormatted = new Date().toLocaleString('pt-BR', {
       day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
     });
