@@ -18,7 +18,6 @@ import { initialATRs } from '../data/atrs';
 import { initialPOPs } from '../data/pops';
 import { initialITs } from '../data/its';
 
-import { hashPassword } from './userManagement';
 
 // ─────────────────────────────────────────────────────────────────────
 // seedDatabaseIfEmpty é chamada de DOIS lugares em App.tsx (logo após o
@@ -118,24 +117,11 @@ async function seedDatabaseIfEmptyForCompany(companyId: string): Promise<void> {
       }
     }
 
-    // Check if users are empty
-    const usersSnap = await getDocs(scoped('users'));
-    if (usersSnap.empty) {
-      console.log(`Seeding default users for company ${companyId}...`);
-      // Nunca gravar o campo `password` em texto puro — só o hash (ver
-      // comentário grande em functions/index.js sobre por que isso
-      // importa). Estas são só as credenciais INICIAIS de instalação;
-      // o admin deve trocar a senha no primeiro acesso.
-      const adminHash = await hashPassword('admin');
-      const collabHash = await hashPassword('Colaborador123');
-      const defaultUsers: UserAccount[] = [
-        { id: '1', companyId, username: 'admin', name: 'Administrador Geral', passwordHash: adminHash, role: 'admin', status: 'Ativo', primeiro_acesso: false, firstAccess: false },
-        { id: '2', companyId, username: 'colaborador', name: 'Colaborador Padrão', passwordHash: collabHash, role: 'colaborador', status: 'Ativo', primeiro_acesso: true, firstAccess: true }
-      ];
-      for (const user of defaultUsers) {
-        await salvarDocumento('users', user, user.id);
-      }
-    }
+    // NÃO cria mais contas padrão (admin/admin, colaborador). Antes, uma
+    // empresa sem usuários recebia contas com IDs FIXOS '1' e '2' na coleção
+    // global `users`, com senha conhecida ("admin") e sobrescrevendo a conta
+    // de mesmo ID de outra empresa. Toda empresa nasce com o próprio admin
+    // pela Cloud Function createCompany.
   } catch (error) {
     console.error('Error seeding initial data: ', error);
   }

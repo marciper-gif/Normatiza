@@ -122,16 +122,12 @@ export default function App() {
   // User Management State
   const [users, rawSetUsers] = useState<UserAccount[]>(() => {
     const saved = localStorage.getItem('ms-users');
-    if (!saved) {
-      const defaultUsers: UserAccount[] = [
-        { id: '1', username: 'admin', name: 'Administrador Geral', password: 'admin', role: 'admin', status: 'Ativo', primeiro_acesso: false },
-        { id: '2', username: 'colaborador', name: 'Colaborador Padrão', password: '123', role: 'colaborador', status: 'Ativo', primeiro_acesso: true }
-      ];
-      localStorage.setItem('ms-users', JSON.stringify(defaultUsers));
-      return defaultUsers;
-    }
+    // Sem contas padrão locais (antes: admin/admin e colaborador/123 com
+    // senha em texto puro no navegador). As contas reais vêm do Firestore.
+    if (!saved) return [];
     try {
-      return JSON.parse(saved);
+      const parsed: UserAccount[] = JSON.parse(saved);
+      return parsed.map(({ password: _legacyPassword, ...rest }) => rest as UserAccount);
     } catch (e) {
       return [];
     }
